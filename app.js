@@ -1,8 +1,13 @@
-require('dotenv').config();
+const path = require('path');
+const dotenv = require('dotenv');
+dotenv.config();
+if (!process.env.MONGO_URI) {
+  dotenv.config({ path: path.join(__dirname, 'env') });
+}
+
 var createError = require('http-errors');
 var mongoose = require('mongoose');
 var express = require('express');
-var path = require('path');
 var cookieParser = require('cookie-parser');
 var logger = require('morgan');
 var cors = require('cors');
@@ -13,9 +18,13 @@ var usersRouter = require('./routes/users');
 var app = express();
 
 // Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI)
-.then(() => console.log('Successfully connected to MongoDB'))
-.catch(err => console.error('MongoDB connection error:', err));
+if (!process.env.MONGO_URI) {
+  console.error('MongoDB connection error: MONGO_URI environment variable is not defined.');
+} else {
+  mongoose.connect(process.env.MONGO_URI)
+    .then(() => console.log('Successfully connected to MongoDB'))
+    .catch(err => console.error('MongoDB connection error:', err));
+}
 // view engine setup
 app.set('views', path.join(__dirname, 'views'));
 app.set('view engine', 'jade');
@@ -101,9 +110,77 @@ app.get('/api/statistics', async (req, res) => {
       count: stat.count
     }));
 
+    // Group by day of week for weekly chart
+    const daysMap = { 1: 'Sun', 2: 'Mon', 3: 'Tue', 4: 'Wed', 5: 'Thu', 6: 'Fri', 7: 'Sat' };
+    const dayOrder = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    const weeklyStats = await Orientation.aggregate([
+      {
+        $group: {
+          _id: { $dayOfWeek: "$createdAt" },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const weeklyMap = {};
+    weeklyStats.forEach(item => {
+      const dayName = daysMap[item._id];
+      if (dayName) weeklyMap[dayName] = item.count;
+    });
+
+    const weeklyData = dayOrder.map(day => ({
+      name: day,
+      attendance: weeklyMap[day] || 0
+    }));
+
+    // Group by hour for today's hourly chart
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+
+    const hourlyStats = await Orientation.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: startOfToday }
+        }
+      },
+      {
+        $group: {
+          _id: { $hour: "$createdAt" },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const slots = [
+      { label: '9 AM', hours: [7, 8, 9, 10] },
+      { label: '11 AM', hours: [11, 12] },
+      { label: '1 PM', hours: [13, 14] },
+      { label: '3 PM', hours: [15, 16] },
+      { label: '5 PM', hours: [17, 18] },
+      { label: '7 PM', hours: [19, 20] },
+      { label: '9 PM', hours: [21, 22, 23] }
+    ];
+
+    const hourlyMap = {};
+    hourlyStats.forEach(item => {
+      const hour = item._id;
+      const slot = slots.find(s => s.hours.includes(hour));
+      if (slot) {
+        hourlyMap[slot.label] = (hourlyMap[slot.label] || 0) + item.count;
+      }
+    });
+
+    const hourlyData = slots.map(slot => ({
+      name: slot.label,
+      attendance: hourlyMap[slot.label] || 0
+    }));
+
     res.status(200).json({
       totalStudents,
-      branchStats: formattedBranchStats
+      branchStats: formattedBranchStats,
+      weeklyData,
+      hourlyData
     });
   } catch (error) {
     console.error('Error fetching statistics:', error);
