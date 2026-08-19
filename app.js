@@ -76,7 +76,22 @@ app.get('/api/orientation/check/:rNo', async (req, res) => {
 // API Route for fetching all orientation data
 app.get('/api/orientation', async (req, res) => {
   try {
-    const orientations = await Orientation.find().sort({ createdAt: -1 });
+    const { date } = req.query;
+    let matchQuery = {};
+    
+    if (date) {
+      const targetDate = new Date(date);
+      const startOfDay = new Date(targetDate);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(targetDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      matchQuery = {
+        createdAt: { $gte: startOfDay, $lte: endOfDay }
+      };
+    }
+
+    const orientations = await Orientation.find(matchQuery).sort({ createdAt: -1 });
     res.status(200).json(orientations);
   } catch (error) {
     console.error('Error fetching data:', error);
@@ -96,10 +111,35 @@ app.post('/api/login', (req, res) => {
 // API Route for Statistics
 app.get('/api/statistics', async (req, res) => {
   try {
-    const totalStudents = await Orientation.countDocuments();
+    const { date } = req.query;
+    let matchStage = {};
+    let targetDate = new Date();
+    
+    if (date) {
+      targetDate = new Date(date);
+      const startOfDay = new Date(targetDate);
+      startOfDay.setHours(0, 0, 0, 0);
+      const endOfDay = new Date(targetDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      
+      matchStage = {
+        createdAt: { $gte: startOfDay, $lte: endOfDay }
+      };
+    }
+
+    const basePipeline = Object.keys(matchStage).length > 0 ? [{ $match: matchStage }] : [];
+
+    const totalStudents = await Orientation.countDocuments(matchStage);
+    
+    const totalAttendedAgg = await Orientation.aggregate([
+      ...basePipeline,
+      { $group: { _id: null, totalAttended: { $sum: "$attendanceCount" } } }
+    ]);
+    const totalAttended = totalAttendedAgg.length > 0 ? totalAttendedAgg[0].totalAttended : 0;
     
     // Group by branch and count
     const branchStats = await Orientation.aggregate([
+      ...basePipeline,
       { $group: { _id: "$branch", count: { $sum: 1 } } },
       { $sort: { count: -1 } }
     ]);
@@ -115,6 +155,7 @@ app.get('/api/statistics', async (req, res) => {
     const dayOrder = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
     const weeklyStats = await Orientation.aggregate([
+      ...basePipeline,
       {
         $group: {
           _id: { $dayOfWeek: "$createdAt" },
@@ -134,14 +175,16 @@ app.get('/api/statistics', async (req, res) => {
       attendance: weeklyMap[day] || 0
     }));
 
-    // Group by hour for today's hourly chart
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
+    // Group by hour for today's hourly chart (or target date)
+    const startOfTargetDay = new Date(targetDate);
+    startOfTargetDay.setHours(0, 0, 0, 0);
+    const endOfTargetDay = new Date(targetDate);
+    endOfTargetDay.setHours(23, 59, 59, 999);
 
     const hourlyStats = await Orientation.aggregate([
       {
         $match: {
-          createdAt: { $gte: startOfToday }
+          createdAt: { $gte: startOfTargetDay, $lte: endOfTargetDay }
         }
       },
       {
@@ -178,6 +221,7 @@ app.get('/api/statistics', async (req, res) => {
 
     res.status(200).json({
       totalStudents,
+      totalAttended,
       branchStats: formattedBranchStats,
       weeklyData,
       hourlyData
