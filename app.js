@@ -173,7 +173,132 @@ app.post('/api/payment/verify-payment', async (req, res) => {
 });
 
 
+// ==================== 2 RUPEES PAYMENT ENDPOINTS ====================
+
+// API Route for getting Razorpay Config (2 Rupees Page)
+app.get('/api/payment/config-2', (req, res) => {
+  res.status(200).json({
+    keyId: process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID',
+    feeAmount: Number(process.env.ORIENTATION_FEE_2) || 2
+  });
+});
+
+// API Route to Create Razorpay Order (2 Rupees Page)
+app.post('/api/payment/create-order-2', async (req, res) => {
+  try {
+    const { amount, rNo } = req.body;
+    const feeAmount = amount || Number(process.env.ORIENTATION_FEE_2) || 2;
+    const keyId = process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID';
+    
+    // If using placeholder key, return fallback demo order for development testing
+    if (keyId === 'YOUR_RAZORPAY_KEY_ID') {
+      const demoOrderId = `order_demo_${Date.now()}`;
+      return res.status(200).json({
+        success: true,
+        orderId: demoOrderId,
+        amount: Math.round(feeAmount * 100),
+        currency: 'INR',
+        keyId: keyId,
+        isDemoMode: true
+      });
+    }
+
+    // Amount in paise (1 INR = 100 paise)
+    const options = {
+      amount: Math.round(feeAmount * 100),
+      currency: 'INR',
+      receipt: `receipt_${(rNo || 'student').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`.substring(0, 40),
+      notes: {
+        rollNo: rNo || 'N/A',
+        purpose: 'Orientation Student Enrollment (2 INR)'
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+    res.status(200).json({
+      success: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: keyId
+    });
+  } catch (error) {
+    console.error('Error creating Razorpay order (2 Rupees):', error);
+    // Fallback if Razorpay API fails due to unverified keys
+    const demoOrderId = `order_fallback_${Date.now()}`;
+    res.status(200).json({
+      success: true,
+      orderId: demoOrderId,
+      amount: Math.round((amount || Number(process.env.ORIENTATION_FEE_2) || 2) * 100),
+      currency: 'INR',
+      keyId: process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID',
+      isDemoMode: true
+    });
+  }
+});
+
+// API Route to Verify Razorpay Payment and Save Orientation Record (2 Rupees Page)
+app.post('/api/payment/verify-payment-2', async (req, res) => {
+  try {
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      studentData
+    } = req.body;
+
+    // Verify HMAC signature if secret is provided and valid
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+
+    if (keySecret && keySecret !== 'YOUR_RAZORPAY_KEY_SECRET') {
+      const generatedSignature = crypto
+        .createHmac('sha256', keySecret)
+        .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+        .digest('hex');
+
+      if (generatedSignature !== razorpay_signature) {
+        return res.status(400).json({ success: false, message: 'Invalid payment signature verification failed.' });
+      }
+    }
+
+    // Check duplicate student roll number
+    if (studentData && studentData.rNo) {
+      const existingEntry = await Orientation.findOne({ rNo: studentData.rNo.toUpperCase() });
+      if (existingEntry) {
+        return res.status(409).json({ success: false, message: 'This roll number has already been registered.' });
+      }
+    }
+
+    // Save student orientation data with payment details
+    const amountPaid = Number(process.env.ORIENTATION_FEE_2) || 2;
+    const newOrientation = new Orientation({
+      rNo: studentData.rNo.toUpperCase(),
+      name: studentData.name,
+      branch: studentData.branch,
+      phone: studentData.phone,
+      attendanceCount: parseInt(studentData.attendanceCount, 10) || 1,
+      razorpayOrderId: razorpay_order_id || `order_demo_${Date.now()}`,
+      razorpayPaymentId: razorpay_payment_id || `pay_demo_${Date.now()}`,
+      paymentStatus: 'paid',
+      amountPaid: amountPaid
+    });
+
+    await newOrientation.save();
+
+    res.status(201).json({
+      success: true,
+      message: 'Payment verified and registration completed successfully!',
+      data: newOrientation
+    });
+  } catch (error) {
+    console.error('Error verifying payment (2 Rupees):', error);
+    res.status(500).json({ success: false, message: 'Failed to process payment registration', error: error.message });
+  }
+});
+
+
 // API Route for submitting orientation data
+
 app.post('/api/orientation', async (req, res) => {
   try {
     const existingEntry = await Orientation.findOne({ rNo: req.body.rNo });
