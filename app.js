@@ -14,6 +14,7 @@ var cors = require('cors');
 
 var indexRouter = require('./routes/index');
 var usersRouter = require('./routes/users');
+var clubEventsRouter = require('./routes/clubEvents');
 
 var app = express();
 
@@ -38,6 +39,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
+app.use('/api/club-events', clubEventsRouter);
 
 // Import Model
 const Orientation = require('./models/Orientation');
@@ -61,10 +63,24 @@ app.get('/api/payment/config', (req, res) => {
 // API Route to Create Razorpay Order
 app.post('/api/payment/create-order', async (req, res) => {
   try {
-    const { amount, rNo } = req.body;
-    const feeAmount = amount || Number(process.env.ORIENTATION_FEE) || 100;
+    const { amount, rNo, slug, eventId } = req.body;
+    let feeAmount = 0;
+
+    // If for a club event, ALWAYS verify and check amount from database
+    if (slug || eventId) {
+      const ClubEvent = require('./models/ClubEvent');
+      const query = eventId ? { _id: eventId } : { slug_link: String(slug).toLowerCase() };
+      const cEvent = await ClubEvent.findOne(query);
+      if (cEvent) {
+        feeAmount = Number(cEvent.amount) || 0;
+      }
+    }
+
+    if (!feeAmount) {
+      feeAmount = amount || Number(process.env.ORIENTATION_FEE) || 100;
+    }
     const keyId = process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID';
-    
+
     // If using placeholder key, return fallback demo order for development testing
     if (keyId === 'YOUR_RAZORPAY_KEY_ID') {
       const demoOrderId = `order_demo_${Date.now()}`;
@@ -189,7 +205,7 @@ app.post('/api/payment/create-order-2', async (req, res) => {
     const { amount, rNo } = req.body;
     const feeAmount = amount || Number(process.env.ORIENTATION_FEE_2) || 2;
     const keyId = process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID';
-    
+
     // If using placeholder key, return fallback demo order for development testing
     if (keyId === 'YOUR_RAZORPAY_KEY_ID') {
       const demoOrderId = `order_demo_${Date.now()}`;
@@ -210,7 +226,7 @@ app.post('/api/payment/create-order-2', async (req, res) => {
       receipt: `receipt_${(rNo || 'student').replace(/[^a-zA-Z0-9]/g, '')}_${Date.now()}`.substring(0, 40),
       notes: {
         rollNo: rNo || 'N/A',
-        purpose: 'Orientation Student Enrollment (2 INR)'
+        purpose: 'Orientation Student Enrollment'
       }
     };
 
@@ -223,7 +239,7 @@ app.post('/api/payment/create-order-2', async (req, res) => {
       keyId: keyId
     });
   } catch (error) {
-    console.error('Error creating Razorpay order (2 Rupees):', error);
+    console.error('Error creating Razorpay order:', error);
     // Fallback if Razorpay API fails due to unverified keys
     const demoOrderId = `order_fallback_${Date.now()}`;
     res.status(200).json({
@@ -329,19 +345,43 @@ app.get('/api/orientation/check/:rNo', async (req, res) => {
   }
 });
 
+// API Route for fetching student data from Aditya API with API key
+app.get('/api/student/:rNo', async (req, res) => {
+  try {
+    const { rNo } = req.params;
+    const apiKey = process.env.STUDENT_API_KEY || process.env.VITE_STUDENT_API_KEY || '';
+    const studentApiUrl = process.env.STUDENT_API_URL || 'https://info.aec.edu.in/adityaapi/api/studentdata';
+
+    const headers = {};
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+
+    const response = await fetch(`${studentApiUrl}/${encodeURIComponent(rNo.toUpperCase().trim())}`, {
+      headers
+    });
+
+    const data = await response.json();
+    return res.status(response.status).json(data);
+  } catch (error) {
+    console.error('Error proxying student data:', error);
+    return res.status(500).json({ message: 'Failed to fetch student data', error: error.message });
+  }
+});
+
 // API Route for fetching all orientation data
 app.get('/api/orientation', async (req, res) => {
   try {
     const { date } = req.query;
     let matchQuery = {};
-    
+
     if (date) {
       const targetDate = new Date(date);
       const startOfDay = new Date(targetDate);
       startOfDay.setHours(0, 0, 0, 0);
       const endOfDay = new Date(targetDate);
       endOfDay.setHours(23, 59, 59, 999);
-      
+
       matchQuery = {
         createdAt: { $gte: startOfDay, $lte: endOfDay }
       };
@@ -370,14 +410,14 @@ app.get('/api/statistics', async (req, res) => {
     const { date } = req.query;
     let matchStage = {};
     let targetDate = new Date();
-    
+
     if (date) {
       targetDate = new Date(date);
       const startOfDay = new Date(targetDate);
       startOfDay.setHours(0, 0, 0, 0);
       const endOfDay = new Date(targetDate);
       endOfDay.setHours(23, 59, 59, 999);
-      
+
       matchStage = {
         createdAt: { $gte: startOfDay, $lte: endOfDay }
       };
@@ -386,13 +426,13 @@ app.get('/api/statistics', async (req, res) => {
     const basePipeline = Object.keys(matchStage).length > 0 ? [{ $match: matchStage }] : [];
 
     const totalStudents = await Orientation.countDocuments(matchStage);
-    
+
     const totalAttendedAgg = await Orientation.aggregate([
       ...basePipeline,
       { $group: { _id: null, totalAttended: { $sum: "$attendanceCount" } } }
     ]);
     const totalAttended = totalAttendedAgg.length > 0 ? totalAttendedAgg[0].totalAttended : 0;
-    
+
     // Group by branch and count
     const branchStats = await Orientation.aggregate([
       ...basePipeline,
@@ -489,12 +529,12 @@ app.get('/api/statistics', async (req, res) => {
 });
 
 // catch 404 and forward to error handler
-app.use(function(req, res, next) {
+app.use(function (req, res, next) {
   next(createError(404));
 });
 
 // error handler
-app.use(function(err, req, res, next) {
+app.use(function (err, req, res, next) {
   // set locals, only providing error in development
   res.locals.message = err.message;
   res.locals.error = req.app.get('env') === 'development' ? err : {};
