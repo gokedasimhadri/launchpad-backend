@@ -68,6 +68,7 @@ router.get('/registrations', async (req, res) => {
       query.$or = [
         { rNo: searchRegex },
         { name: searchRegex },
+        { email: searchRegex },
         { phone: searchRegex },
         { eventName: searchRegex },
         { transactionId: searchRegex },
@@ -104,7 +105,7 @@ router.get('/registrations', async (req, res) => {
         return {
           ...r,
           paymentStatus: payment.paymentStatus === 'paid' ? 'paid' : r.paymentStatus,
-          amountPaid: payment.amount !== undefined ? payment.amount : (r.amountPaid || 0),
+          amountPaid: Math.floor(payment.amount !== undefined ? payment.amount : (r.amountPaid || 0)),
           razorpayPaymentId: payment.razorpayPaymentId || r.razorpayPaymentId || '',
           razorpayOrderId: payment.razorpayOrderId || r.razorpayOrderId || '',
           transactionId: payment.transactionId || payment.razorpayPaymentId || r.transactionId || '',
@@ -124,9 +125,9 @@ router.get('/registrations', async (req, res) => {
     const freeCount = allRegistrations.filter(r => r.paymentStatus === 'free').length;
 
     // Total revenue from separate 'clubeventrpayments' collection (with fallback to legacy paid amounts)
-    let totalRevenue = allPayments.reduce((acc, p) => acc + (Number(p.amount) || 0), 0);
+    let totalRevenue = allPayments.reduce((acc, p) => acc + Math.floor(Number(p.amount) || 0), 0);
     if (totalRevenue === 0) {
-      totalRevenue = allRegistrations.reduce((acc, r) => acc + (Number(r.amountPaid) || 0), 0);
+      totalRevenue = allRegistrations.reduce((acc, r) => acc + Math.floor(Number(r.amountPaid) || 0), 0);
     }
 
     res.status(200).json({
@@ -170,6 +171,7 @@ router.get('/payments', async (req, res) => {
       query.$or = [
         { rNo: searchRegex },
         { name: searchRegex },
+        { email: searchRegex },
         { phone: searchRegex },
         { eventName: searchRegex },
         { transactionId: searchRegex },
@@ -212,7 +214,7 @@ router.get('/:id', async (req, res) => {
 // POST /api/club-events - Create a new event
 router.post('/', async (req, res) => {
   try {
-    const { name, amount, registration, slug_link, status } = req.body;
+    const { name, amount, registration, slug_link, status, role, password } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Club event name is required' });
@@ -250,6 +252,8 @@ router.post('/', async (req, res) => {
       registration: validRegistration,
       slug_link: cleanSlug,
       status: validStatus,
+      role: role ? role.trim() : '',
+      password: password ? password.trim() : '',
     });
 
     await newEvent.save();
@@ -272,7 +276,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, amount, registration, slug_link, status } = req.body;
+    const { name, amount, registration, slug_link, status, role, password } = req.body;
 
     const event = await ClubEvent.findById(id);
     if (!event) {
@@ -324,6 +328,14 @@ router.put('/:id', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Status must be either "active" or "inactive"' });
       }
       event.status = stat;
+    }
+
+    if (role !== undefined) {
+      event.role = role.trim();
+    }
+
+    if (password !== undefined) {
+      event.password = password.trim();
     }
 
     await event.save();
@@ -538,8 +550,8 @@ router.post('/:idOrSlug/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'This event is currently inactive.' });
     }
 
-    if (!studentData || !studentData.rNo || !studentData.name) {
-      return res.status(400).json({ success: false, message: 'Roll number and student name are required.' });
+    if (!studentData || !studentData.rNo?.trim() || !studentData.name?.trim() || !studentData.email?.trim() || !studentData.branch?.trim() || !studentData.gender?.trim() || !studentData.bloodgroup?.trim() || !studentData.phone?.trim()) {
+      return res.status(400).json({ success: false, message: 'All fields (Roll number, Name, Email, Branch, Gender, Blood group, Phone number) are required.' });
     }
 
     const cleanRNo = studentData.rNo.toUpperCase().trim();
@@ -562,6 +574,7 @@ router.post('/:idOrSlug/register', async (req, res) => {
 
       // If pending, update any updated fields and return success to proceed to payment
       existing.name = studentData.name || existing.name;
+      existing.email = studentData.email || existing.email;
       existing.branch = studentData.branch || existing.branch;
       existing.phone = studentData.phone || existing.phone;
       existing.gender = studentData.gender || existing.gender;
@@ -586,6 +599,7 @@ router.post('/:idOrSlug/register', async (req, res) => {
       eventSlug: event.slug_link,
       rNo: cleanRNo,
       name: studentData.name.trim(),
+      email: studentData.email ? studentData.email.trim() : '',
       branch: studentData.branch ? studentData.branch.trim() : 'N/A',
       phone: studentData.phone ? String(studentData.phone).trim() : '',
       gender: studentData.gender ? studentData.gender.trim() : '',
@@ -741,6 +755,7 @@ router.post('/:idOrSlug/record-payment', async (req, res) => {
       registrationId: registration._id,
       rNo: cleanRNo,
       name: registration.name,
+      email: registration.email || '',
       branch: registration.branch,
       phone: registration.phone,
       amount: Number(event.amount) || 0,
@@ -774,6 +789,256 @@ router.post('/:idOrSlug/record-payment', async (req, res) => {
   } catch (error) {
     console.error('Error recording club event payment:', error);
     res.status(500).json({ success: false, message: 'Failed to record payment', error: error.message });
+  }
+});
+
+// Helper to query Razorpay REST API for a single payment ID
+const fetchRazorpayPayment = async (paymentId) => {
+  const keyId = process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID';
+  const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+  if (!keyId || keyId === 'YOUR_RAZORPAY_KEY_ID') return null;
+
+  const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+  try {
+    const res = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+      headers: { 'Authorization': `Basic ${auth}` }
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.error('Error fetching Razorpay payment:', e);
+    return null;
+  }
+};
+
+// Helper to query Razorpay REST API payments list
+const fetchRazorpayPaymentsList = async (count = 100) => {
+  const keyId = process.env.RAZORPAY_KEY_ID || 'YOUR_RAZORPAY_KEY_ID';
+  const keySecret = process.env.RAZORPAY_KEY_SECRET || '';
+  if (!keyId || keyId === 'YOUR_RAZORPAY_KEY_ID') return [];
+
+  const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+  try {
+    const res = await fetch(`https://api.razorpay.com/v1/payments?count=${count}`, {
+      headers: { 'Authorization': `Basic ${auth}` }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.items || [];
+  } catch (e) {
+    console.error('Error fetching Razorpay payments list:', e);
+    return [];
+  }
+};
+
+// POST /api/club-events/verify-razorpay-sync - Verify payment with Razorpay & update database
+router.post('/verify-razorpay-sync', async (req, res) => {
+  try {
+    const { registrationId, rNo, razorpayPaymentId } = req.body;
+
+    let registration;
+    if (registrationId) {
+      registration = await ClubEventRegistration.findById(registrationId);
+    } else if (rNo) {
+      registration = await ClubEventRegistration.findOne({ rNo: rNo.toUpperCase().trim() });
+    }
+
+    if (!registration) {
+      return res.status(404).json({ success: false, message: 'Registration record not found.' });
+    }
+
+    const event = await ClubEvent.findById(registration.eventId);
+    const cleanRNo = registration.rNo.toUpperCase().trim();
+
+    let paymentData = null;
+
+    // 1. If explicit Razorpay Payment ID provided
+    if (razorpayPaymentId && razorpayPaymentId.trim()) {
+      paymentData = await fetchRazorpayPayment(razorpayPaymentId.trim());
+    }
+
+    // 2. If registration has razorpayOrderId, fetch payments for order
+    if (!paymentData && registration.razorpayOrderId) {
+      const keyId = process.env.RAZORPAY_KEY_ID;
+      const keySecret = process.env.RAZORPAY_KEY_SECRET;
+      if (keyId && keySecret && keyId !== 'YOUR_RAZORPAY_KEY_ID') {
+        const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+        try {
+          const orderRes = await fetch(`https://api.razorpay.com/v1/orders/${encodeURIComponent(registration.razorpayOrderId)}/payments`, {
+            headers: { 'Authorization': `Basic ${auth}` }
+          });
+          if (orderRes.ok) {
+            const orderPayments = await orderRes.json();
+            if (orderPayments.items && orderPayments.items.length > 0) {
+              paymentData = orderPayments.items.find(p => p.status === 'captured' || p.status === 'authorized') || orderPayments.items[0];
+            }
+          }
+        } catch (oErr) {
+          console.warn('Order payments fetch error:', oErr);
+        }
+      }
+    }
+
+    // 3. Search recent Razorpay payments matching roll number in notes
+    if (!paymentData) {
+      const allPayments = await fetchRazorpayPaymentsList(100);
+      paymentData = allPayments.find(p => {
+        const notesRoll = p.notes && (p.notes.rollNo || p.notes.rNo);
+        return (p.status === 'captured' || p.status === 'authorized') &&
+               notesRoll && String(notesRoll).toUpperCase().trim() === cleanRNo;
+      });
+    }
+
+    if (!paymentData) {
+      return res.status(404).json({
+        success: false,
+        message: `No captured Razorpay transaction found for roll number ${cleanRNo}. Please enter payment ID manually.`
+      });
+    }
+
+    if (paymentData.status !== 'captured' && paymentData.status !== 'authorized') {
+      return res.status(400).json({
+        success: false,
+        message: `Razorpay transaction ${paymentData.id} status is "${paymentData.status}", not captured.`
+      });
+    }
+
+    const paidAmount = (event && Number(event.amount) > 0)
+      ? Number(event.amount)
+      : Math.floor(Number(paymentData.amount) / 100);
+    const txnId = paymentData.id;
+
+    // Check if payment document exists in 'clubeventrpayments'
+    let paymentRecord = await ClubEventPayment.findOne({
+      $or: [
+        { razorpayPaymentId: txnId },
+        { transactionId: txnId },
+        { eventId: registration.eventId, rNo: cleanRNo, paymentStatus: 'paid' }
+      ]
+    });
+
+    if (!paymentRecord) {
+      paymentRecord = new ClubEventPayment({
+        eventId: registration.eventId,
+        eventName: registration.eventName,
+        eventSlug: registration.eventSlug,
+        registrationId: registration._id,
+        rNo: cleanRNo,
+        name: registration.name,
+        email: registration.email || paymentData.email || '',
+        branch: registration.branch,
+        phone: registration.phone || paymentData.contact || 'N/A',
+        amount: paidAmount,
+        currency: paymentData.currency || 'INR',
+        razorpayOrderId: paymentData.order_id || registration.razorpayOrderId || null,
+        razorpayPaymentId: txnId,
+        razorpaySignature: 'verified_via_razorpay_api',
+        transactionId: txnId,
+        paymentStatus: 'paid',
+        paymentMethod: paymentData.method || 'razorpay',
+      });
+      await paymentRecord.save();
+    }
+
+    // Update registration document
+    registration.paymentStatus = 'paid';
+    registration.paymentId = paymentRecord._id;
+    registration.amountPaid = paidAmount;
+    registration.razorpayPaymentId = txnId;
+    if (paymentData.order_id) {
+      registration.razorpayOrderId = paymentData.order_id;
+    }
+    await registration.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully verified and recorded Razorpay payment (${txnId})!`,
+      data: {
+        registration,
+        payment: paymentRecord,
+        razorpayDetails: paymentData
+      }
+    });
+  } catch (error) {
+    console.error('Error verifying Razorpay sync:', error);
+    res.status(500).json({ success: false, message: 'Verification error', error: error.message });
+  }
+});
+
+// POST /api/club-events/sync-all-pending - Reconcile all pending registrations with Razorpay
+router.post('/sync-all-pending', async (req, res) => {
+  try {
+    const pendingRegistrations = await ClubEventRegistration.find({ paymentStatus: 'pending' });
+    if (pendingRegistrations.length === 0) {
+      return res.status(200).json({ success: true, message: 'No pending registrations to sync.', syncedCount: 0 });
+    }
+
+    const allPayments = await fetchRazorpayPaymentsList(100);
+    let syncedCount = 0;
+    const syncedRecords = [];
+
+    for (const registration of pendingRegistrations) {
+      const cleanRNo = registration.rNo.toUpperCase().trim();
+      const match = allPayments.find(p => {
+        const notesRoll = p.notes && (p.notes.rollNo || p.notes.rNo);
+        return (p.status === 'captured' || p.status === 'authorized') &&
+               notesRoll && String(notesRoll).toUpperCase().trim() === cleanRNo;
+      });
+
+      if (match) {
+        const paidAmount = (registration && Number(registration.amountPaid) > 0)
+          ? Number(registration.amountPaid)
+          : Math.floor(Number(match.amount) / 100);
+        const txnId = match.id;
+
+        let paymentRecord = await ClubEventPayment.findOne({
+          $or: [{ razorpayPaymentId: txnId }, { transactionId: txnId }]
+        });
+
+        if (!paymentRecord) {
+          paymentRecord = new ClubEventPayment({
+            eventId: registration.eventId,
+            eventName: registration.eventName,
+            eventSlug: registration.eventSlug,
+            registrationId: registration._id,
+            rNo: cleanRNo,
+            name: registration.name,
+            email: registration.email || match.email || '',
+            branch: registration.branch,
+            phone: registration.phone || match.contact || 'N/A',
+            amount: paidAmount,
+            currency: match.currency || 'INR',
+            razorpayOrderId: match.order_id || registration.razorpayOrderId || null,
+            razorpayPaymentId: txnId,
+            razorpaySignature: 'verified_via_razorpay_api',
+            transactionId: txnId,
+            paymentStatus: 'paid',
+            paymentMethod: match.method || 'razorpay',
+          });
+          await paymentRecord.save();
+        }
+
+        registration.paymentStatus = 'paid';
+        registration.paymentId = paymentRecord._id;
+        registration.amountPaid = paidAmount;
+        registration.razorpayPaymentId = txnId;
+        if (match.order_id) registration.razorpayOrderId = match.order_id;
+        await registration.save();
+
+        syncedCount++;
+        syncedRecords.push({ rNo: cleanRNo, txnId });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully synchronized ${syncedCount} payment(s) from Razorpay!`,
+      syncedCount,
+      syncedRecords
+    });
+  } catch (error) {
+    console.error('Error syncing all pending payments:', error);
+    res.status(500).json({ success: false, message: 'Sync error', error: error.message });
   }
 });
 

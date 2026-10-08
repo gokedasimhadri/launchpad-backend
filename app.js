@@ -188,6 +188,74 @@ app.post('/api/payment/verify-payment', async (req, res) => {
   }
 });
 
+// Webhook endpoint to receive payment.captured events directly from Razorpay servers
+app.post('/api/webhooks/razorpay', async (req, res) => {
+  try {
+    const eventPayload = req.body;
+    if (eventPayload && eventPayload.event === 'payment.captured' && eventPayload.payload?.payment?.entity) {
+      const paymentEntity = eventPayload.payload.payment.entity;
+      const notes = paymentEntity.notes || {};
+      const rNo = (notes.rollNo || notes.rNo || '').toUpperCase().trim();
+      const eventId = notes.eventId;
+
+      if (rNo) {
+        const ClubEventRegistration = require('./models/ClubEventRegistration');
+        const ClubEventPayment = require('./models/ClubEventPayment');
+
+        let registration;
+        if (eventId) {
+          registration = await ClubEventRegistration.findOne({ eventId, rNo });
+        } else {
+          registration = await ClubEventRegistration.findOne({ rNo, paymentStatus: 'pending' });
+        }
+
+        if (registration) {
+          const txnId = paymentEntity.id;
+          const paidAmount = Number(paymentEntity.amount) / 100 || 0;
+
+          let paymentRecord = await ClubEventPayment.findOne({ razorpayPaymentId: txnId });
+          if (!paymentRecord) {
+            paymentRecord = new ClubEventPayment({
+              eventId: registration.eventId,
+              eventName: registration.eventName,
+              eventSlug: registration.eventSlug,
+              registrationId: registration._id,
+              rNo: rNo,
+              name: registration.name,
+              email: registration.email || paymentEntity.email || '',
+              branch: registration.branch,
+              phone: registration.phone || paymentEntity.contact || '',
+              amount: paidAmount,
+              currency: paymentEntity.currency || 'INR',
+              razorpayOrderId: paymentEntity.order_id || null,
+              razorpayPaymentId: txnId,
+              razorpaySignature: 'razorpay_webhook_event',
+              transactionId: txnId,
+              paymentStatus: 'paid',
+              paymentMethod: paymentEntity.method || 'razorpay',
+            });
+            await paymentRecord.save();
+          }
+
+          registration.paymentStatus = 'paid';
+          registration.paymentId = paymentRecord._id;
+          registration.amountPaid = paidAmount;
+          registration.razorpayPaymentId = txnId;
+          if (paymentEntity.order_id) registration.razorpayOrderId = paymentEntity.order_id;
+          await registration.save();
+
+          console.log(`[Webhook] Reconciled payment ${txnId} for roll number ${rNo}`);
+        }
+      }
+    }
+    res.status(200).json({ status: 'ok' });
+  } catch (err) {
+    console.error('Error handling Razorpay webhook:', err);
+    res.status(200).json({ status: 'error', message: err.message });
+  }
+});
+
+
 
 // ==================== 2 RUPEES PAYMENT ENDPOINTS ====================
 
@@ -396,12 +464,62 @@ app.get('/api/orientation', async (req, res) => {
 });
 
 // API Route for Login
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  if (username === 'dean' && password === 'Aditya@123') {
-    return res.status(200).json({ success: true, message: 'Login successful' });
+app.post('/api/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const cleanUser = (username || '').trim();
+    const cleanPass = (password || '').trim();
+
+    // 1. Admin login (Dean)
+    if (cleanUser === 'dean' && cleanPass === 'Aditya@123') {
+      return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        role: 'admin',
+        username: 'dean',
+        allowedPages: ['dashboard', 'students', 'club-events', 'registrations']
+      });
+    }
+
+    // 2. Club Event Manager role login
+    const ClubEvent = require('./models/ClubEvent');
+    if (cleanUser && cleanPass) {
+      const clubEvent = await ClubEvent.findOne({
+        role: new RegExp(`^${cleanUser}$`, 'i')
+      });
+
+      if (clubEvent && clubEvent.comparePassword(cleanPass)) {
+        if (clubEvent.status === 'inactive') {
+          return res.status(403).json({
+            success: false,
+            message: `The account for event "${clubEvent.name}" is currently inactive.`
+          });
+        }
+
+        // Auto-migrate legacy plain text password to bcrypt hash on login
+        if (!clubEvent.password.startsWith('$2a$') && !clubEvent.password.startsWith('$2b$')) {
+          clubEvent.password = cleanPass;
+          await clubEvent.save();
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: `Logged in as ${clubEvent.role || clubEvent.name}`,
+          role: 'club_manager',
+          username: clubEvent.role,
+          clubEventId: clubEvent._id,
+          clubEventSlug: clubEvent.slug_link,
+          clubEventName: clubEvent.name,
+          allowedPages: ['club-events', 'registrations']
+        });
+      }
+    }
+
+    return res.status(401).json({ success: false, message: 'Invalid role/username or password' });
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.status(500).json({ success: false, message: 'Server error during login' });
   }
-  return res.status(401).json({ success: false, message: 'Invalid username or password' });
 });
 
 // API Route for Statistics

@@ -28,6 +28,11 @@ const clubEventRegistrationSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    email: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     branch: {
       type: String,
       required: true,
