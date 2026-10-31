@@ -639,10 +639,10 @@ router.post('/:idOrSlug/register', async (req, res) => {
         const gender = (m.gender || '').trim();
         const bloodgroup = (m.bloodgroup || '').trim();
 
-        if (!rNo || !name || !email || !branch || !phone || !gender || !bloodgroup) {
+        if (!rNo || !name || !email || !branch || !phone || !gender) {
           return res.status(400).json({
             success: false,
-            message: `All fields (Roll number, Name, Email, Branch, Gender, Blood group, Phone number) are required for Team Member ${i + 1} (${name || rNo || 'Unnamed'}).`
+            message: `All fields (Roll number, Name, Email, Branch, Gender, Phone number) are required for Team Member ${i + 1} (${name || rNo || 'Unnamed'}).`
           });
         }
 
@@ -757,8 +757,8 @@ router.post('/:idOrSlug/register', async (req, res) => {
     }
 
     // Default: Per Head (Single Person) Registration
-    if (!studentData.rNo?.trim() || !studentData.name?.trim() || !studentData.email?.trim() || !studentData.branch?.trim() || !studentData.gender?.trim() || !studentData.bloodgroup?.trim() || !studentData.phone?.trim()) {
-      return res.status(400).json({ success: false, message: 'All fields (Roll number, Name, Email, Branch, Gender, Blood group, Phone number) are required.' });
+    if (!studentData.rNo?.trim() || !studentData.name?.trim() || !studentData.email?.trim() || !studentData.branch?.trim() || !studentData.gender?.trim() || !studentData.phone?.trim()) {
+      return res.status(400).json({ success: false, message: 'All fields (Roll number, Name, Email, Branch, Gender, Phone number) are required.' });
     }
 
     const cleanRNo = studentData.rNo.toUpperCase().trim();
