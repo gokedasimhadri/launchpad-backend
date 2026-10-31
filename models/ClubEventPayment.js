@@ -82,6 +82,15 @@ const clubEventPaymentSchema = new mongoose.Schema(
       type: String,
       default: 'razorpay',
     },
+    teamName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    teamSize: {
+      type: Number,
+      default: 1,
+    },
   },
   { timestamps: true }
 );

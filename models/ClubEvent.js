@@ -45,6 +45,28 @@ const clubEventSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    teamType: {
+      type: String,
+      enum: ['per_head', 'per_team'],
+      default: 'per_head',
+      lowercase: true,
+      trim: true,
+    },
+    personsCount: {
+      type: Number,
+      default: 1,
+      min: [1, 'Persons count must be at least 1'],
+    },
+    minTeamSize: {
+      type: Number,
+      default: 1,
+      min: [1, 'Minimum team size must be at least 1'],
+    },
+    maxTeamSize: {
+      type: Number,
+      default: 1,
+      min: [1, 'Maximum team size must be at least 1'],
+    },
   },
   { timestamps: true }
 );

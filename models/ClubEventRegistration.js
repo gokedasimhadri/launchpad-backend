@@ -79,12 +79,41 @@ const clubEventRegistrationSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    teamType: {
+      type: String,
+      enum: ['per_head', 'per_team'],
+      default: 'per_head',
+      lowercase: true,
+      trim: true,
+    },
+    teamName: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    teamSize: {
+      type: Number,
+      default: 1,
+    },
+    teamMembers: [
+      {
+        rNo: { type: String, trim: true, uppercase: true },
+        name: { type: String, trim: true },
+        email: { type: String, trim: true, default: '' },
+        branch: { type: String, trim: true, default: '' },
+        phone: { type: String, trim: true, default: '' },
+        gender: { type: String, trim: true, default: '' },
+        bloodgroup: { type: String, trim: true, default: '' },
+        isLeader: { type: Boolean, default: false },
+      }
+    ],
   },
   { timestamps: true }
 );
 
 // Prevent duplicate registration for the same student in the same event
 clubEventRegistrationSchema.index({ eventId: 1, rNo: 1 }, { unique: true });
+clubEventRegistrationSchema.index({ eventId: 1, 'teamMembers.rNo': 1 });
 
 // Explicit collection name 'clubeventregistrations'
 module.exports = mongoose.model('ClubEventRegistration', clubEventRegistrationSchema, 'clubeventregistrations');

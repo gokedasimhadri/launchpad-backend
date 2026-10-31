@@ -214,7 +214,7 @@ router.get('/:id', async (req, res) => {
 // POST /api/club-events - Create a new event
 router.post('/', async (req, res) => {
   try {
-    const { name, amount, registration, slug_link, status, role, password } = req.body;
+    const { name, amount, registration, slug_link, status, role, password, teamType, personsCount, minTeamSize, maxTeamSize } = req.body;
 
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'Club event name is required' });
@@ -246,6 +246,13 @@ router.post('/', async (req, res) => {
       ? status.toLowerCase()
       : 'active';
 
+    const cleanTeamType = teamType === 'per_team' ? 'per_team' : 'per_head';
+    let cleanPersonsCount = 1;
+
+    if (cleanTeamType === 'per_team') {
+      cleanPersonsCount = Math.max(1, parseInt(personsCount || maxTeamSize || minTeamSize, 10) || 2);
+    }
+
     const newEvent = new ClubEvent({
       name: name.trim(),
       amount: Number(amount),
@@ -254,6 +261,10 @@ router.post('/', async (req, res) => {
       status: validStatus,
       role: role ? role.trim() : '',
       password: password ? password.trim() : '',
+      teamType: cleanTeamType,
+      personsCount: cleanPersonsCount,
+      minTeamSize: cleanPersonsCount,
+      maxTeamSize: cleanPersonsCount,
     });
 
     await newEvent.save();
@@ -276,7 +287,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, amount, registration, slug_link, status, role, password } = req.body;
+    const { name, amount, registration, slug_link, status, role, password, teamType, personsCount, minTeamSize, maxTeamSize } = req.body;
 
     const event = await ClubEvent.findById(id);
     if (!event) {
@@ -336,6 +347,34 @@ router.put('/:id', async (req, res) => {
 
     if (password !== undefined) {
       event.password = password.trim();
+    }
+
+    if (teamType !== undefined) {
+      const cleanTeamType = teamType === 'per_team' ? 'per_team' : 'per_head';
+      event.teamType = cleanTeamType;
+      if (cleanTeamType === 'per_team') {
+        const count = personsCount !== undefined
+          ? Math.max(1, parseInt(personsCount, 10) || 2)
+          : (maxTeamSize !== undefined ? Math.max(1, parseInt(maxTeamSize, 10) || 2) : (event.personsCount || event.maxTeamSize || 2));
+        event.personsCount = count;
+        event.minTeamSize = count;
+        event.maxTeamSize = count;
+      } else {
+        event.personsCount = 1;
+        event.minTeamSize = 1;
+        event.maxTeamSize = 1;
+      }
+    } else if (personsCount !== undefined) {
+      const count = Math.max(1, parseInt(personsCount, 10) || 1);
+      event.personsCount = count;
+      event.minTeamSize = count;
+      event.maxTeamSize = count;
+    } else if (minTeamSize !== undefined || maxTeamSize !== undefined) {
+      const minVal = minTeamSize !== undefined ? Math.max(1, parseInt(minTeamSize, 10) || 1) : (event.minTeamSize || 1);
+      const maxVal = maxTeamSize !== undefined ? Math.max(minVal, parseInt(maxTeamSize, 10) || minVal) : Math.max(minVal, event.maxTeamSize || minVal);
+      event.personsCount = maxVal;
+      event.minTeamSize = minVal;
+      event.maxTeamSize = maxVal;
     }
 
     await event.save();
@@ -442,7 +481,7 @@ router.get('/:idOrSlug/check/:rNo', async (req, res) => {
     const cleanRNo = rNo.toUpperCase().trim();
     const registration = await ClubEventRegistration.findOne({
       eventId: event._id,
-      rNo: cleanRNo
+      $or: [{ rNo: cleanRNo }, { 'teamMembers.rNo': cleanRNo }]
     });
 
     if (!registration) {
@@ -452,19 +491,25 @@ router.get('/:idOrSlug/check/:rNo', async (req, res) => {
     // Check payment in 'clubeventrpayments' collection
     const payment = await ClubEventPayment.findOne({
       eventId: event._id,
-      rNo: cleanRNo,
+      $or: [{ rNo: registration.rNo }, { rNo: cleanRNo }, { registrationId: registration._id }],
       paymentStatus: 'paid'
     });
 
     const isPaid = registration.paymentStatus === 'paid' || Boolean(payment);
     const isFree = registration.paymentStatus === 'free' || Number(event.amount) === 0;
+    const isTeamMemberOnly = registration.teamType === 'per_team' && registration.rNo !== cleanRNo;
 
     if (isPaid || isFree) {
       return res.status(200).json({
         exists: true,
         isPaid: true,
         isFree: isFree,
-        message: 'Student is already registered for this event.',
+        isTeamMemberOnly: isTeamMemberOnly,
+        teamName: registration.teamName || '',
+        leaderRNo: registration.rNo,
+        message: isTeamMemberOnly
+          ? `Roll number ${cleanRNo} is already registered for this event.`
+          : 'Student is already registered for this event.',
         registration: registration,
         payment: payment || null
       });
@@ -475,7 +520,12 @@ router.get('/:idOrSlug/check/:rNo', async (req, res) => {
       exists: true,
       isPaid: false,
       isPendingPayment: true,
-      message: 'Student is already registered, but payment is pending.',
+      isTeamMemberOnly: isTeamMemberOnly,
+      teamName: registration.teamName || '',
+      leaderRNo: registration.rNo,
+      message: isTeamMemberOnly
+        ? `Roll number ${cleanRNo} is registered, but payment by team leader (${registration.rNo}) is pending.`
+        : 'Student is already registered, but payment is pending.',
       registration: registration
     });
   } catch (error) {
@@ -550,7 +600,164 @@ router.post('/:idOrSlug/register', async (req, res) => {
       return res.status(400).json({ success: false, message: 'This event is currently inactive.' });
     }
 
-    if (!studentData || !studentData.rNo?.trim() || !studentData.name?.trim() || !studentData.email?.trim() || !studentData.branch?.trim() || !studentData.gender?.trim() || !studentData.bloodgroup?.trim() || !studentData.phone?.trim()) {
+    if (!studentData) {
+      return res.status(400).json({ success: false, message: 'Registration details are required.' });
+    }
+
+    const isTeamEvent = event.teamType === 'per_team';
+
+    // Handle Team Event Registration
+    if (isTeamEvent) {
+      const { teamMembers } = studentData;
+      const teamName = (studentData.teamName || '').trim();
+
+      if (!Array.isArray(teamMembers) || teamMembers.length === 0) {
+        return res.status(400).json({ success: false, message: 'Team members list is required.' });
+      }
+
+      const minMembers = 1;
+      const maxMembers = event.maxTeamSize || event.personsCount || 10;
+
+      if (teamMembers.length < minMembers || teamMembers.length > maxMembers) {
+        return res.status(400).json({
+          success: false,
+          message: `This event accepts between 1 and ${maxMembers} participants (received ${teamMembers.length}).`
+        });
+      }
+
+      // Validate each member and check for duplicates within the submitted team
+      const sanitizedMembers = [];
+      const seenRolls = new Set();
+
+      for (let i = 0; i < teamMembers.length; i++) {
+        const m = teamMembers[i];
+        const rNo = (m.rNo || '').toUpperCase().trim();
+        const name = (m.name || '').trim();
+        const email = (m.email || '').trim();
+        const branch = (m.branch || '').trim();
+        const phone = String(m.phone || '').trim();
+        const gender = (m.gender || '').trim();
+        const bloodgroup = (m.bloodgroup || '').trim();
+
+        if (!rNo || !name || !email || !branch || !phone || !gender || !bloodgroup) {
+          return res.status(400).json({
+            success: false,
+            message: `All fields (Roll number, Name, Email, Branch, Gender, Blood group, Phone number) are required for Team Member ${i + 1} (${name || rNo || 'Unnamed'}).`
+          });
+        }
+
+        if (seenRolls.has(rNo)) {
+          return res.status(400).json({
+            success: false,
+            message: `Roll number ${rNo} is entered multiple times in this team.`
+          });
+        }
+        seenRolls.add(rNo);
+
+        sanitizedMembers.push({
+          rNo,
+          name,
+          email,
+          branch,
+          phone,
+          gender,
+          bloodgroup,
+          isLeader: i === 0,
+        });
+      }
+
+      const allMemberRolls = Array.from(seenRolls);
+      const leader = sanitizedMembers[0];
+
+      // Check if leader or any member is already registered for this event
+      const existingRegistrations = await ClubEventRegistration.find({
+        eventId: event._id,
+        $or: [
+          { rNo: { $in: allMemberRolls } },
+          { 'teamMembers.rNo': { $in: allMemberRolls } }
+        ]
+      });
+
+      if (existingRegistrations && existingRegistrations.length > 0) {
+        // If it's only the leader updating while payment is pending, allow update
+        const isLeaderSelfUpdate = existingRegistrations.length === 1 &&
+          existingRegistrations[0].rNo === leader.rNo &&
+          existingRegistrations[0].paymentStatus === 'pending';
+
+        if (isLeaderSelfUpdate) {
+          const leaderReg = existingRegistrations[0];
+          leaderReg.teamName = teamName.trim();
+          leaderReg.teamSize = sanitizedMembers.length;
+          leaderReg.teamMembers = sanitizedMembers;
+          leaderReg.name = leader.name;
+          leaderReg.email = leader.email;
+          leaderReg.branch = leader.branch;
+          leaderReg.phone = leader.phone;
+          leaderReg.gender = leader.gender;
+          leaderReg.bloodgroup = leader.bloodgroup;
+          await leaderReg.save();
+
+          return res.status(200).json({
+            success: true,
+            isExisting: true,
+            isPendingPayment: true,
+            message: 'Team registration details updated. Please proceed to payment.',
+            data: leaderReg,
+            eventAmount: event.amount
+          });
+        }
+
+        // Identify which rolls clash
+        const clashRolls = new Set();
+        existingRegistrations.forEach(reg => {
+          allMemberRolls.forEach(r => {
+            if (reg.rNo === r || reg.teamMembers?.some(tm => tm.rNo === r)) {
+              clashRolls.add(r);
+            }
+          });
+        });
+
+        return res.status(409).json({
+          success: false,
+          message: `The following student(s) are already registered for this event: ${Array.from(clashRolls).join(', ')}.`
+        });
+      }
+
+      // Create new Team Registration
+      const isFree = Number(event.amount) === 0;
+      const registrationRecord = new ClubEventRegistration({
+        eventId: event._id,
+        eventName: event.name,
+        eventSlug: event.slug_link,
+        rNo: leader.rNo,
+        name: leader.name,
+        email: leader.email,
+        branch: leader.branch,
+        phone: leader.phone,
+        gender: leader.gender,
+        bloodgroup: leader.bloodgroup,
+        teamType: 'per_team',
+        teamName: teamName.trim(),
+        teamSize: sanitizedMembers.length,
+        teamMembers: sanitizedMembers,
+        paymentStatus: isFree ? 'free' : 'pending',
+      });
+
+      await registrationRecord.save();
+
+      return res.status(201).json({
+        success: true,
+        message: isFree
+          ? `Team registration successfully completed for "${event.name}"!`
+          : `Team registration details saved! Proceed to payment.`,
+        data: registrationRecord,
+        eventAmount: event.amount,
+        isFree: isFree
+      });
+    }
+
+    // Default: Per Head (Single Person) Registration
+    if (!studentData.rNo?.trim() || !studentData.name?.trim() || !studentData.email?.trim() || !studentData.branch?.trim() || !studentData.gender?.trim() || !studentData.bloodgroup?.trim() || !studentData.phone?.trim()) {
       return res.status(400).json({ success: false, message: 'All fields (Roll number, Name, Email, Branch, Gender, Blood group, Phone number) are required.' });
     }
 
@@ -559,7 +766,7 @@ router.post('/:idOrSlug/register', async (req, res) => {
     // Check if student already registered in 'clubeventregistrations'
     const existing = await ClubEventRegistration.findOne({
       eventId: event._id,
-      rNo: cleanRNo
+      $or: [{ rNo: cleanRNo }, { 'teamMembers.rNo': cleanRNo }]
     });
 
     if (existing) {
@@ -579,6 +786,18 @@ router.post('/:idOrSlug/register', async (req, res) => {
       existing.phone = studentData.phone || existing.phone;
       existing.gender = studentData.gender || existing.gender;
       existing.bloodgroup = studentData.bloodgroup || existing.bloodgroup;
+      existing.teamType = 'per_head';
+      existing.teamSize = 1;
+      existing.teamMembers = [{
+        rNo: cleanRNo,
+        name: existing.name,
+        email: existing.email,
+        branch: existing.branch,
+        phone: existing.phone,
+        gender: existing.gender,
+        bloodgroup: existing.bloodgroup,
+        isLeader: true
+      }];
       await existing.save();
 
       return res.status(200).json({
@@ -604,6 +823,19 @@ router.post('/:idOrSlug/register', async (req, res) => {
       phone: studentData.phone ? String(studentData.phone).trim() : '',
       gender: studentData.gender ? studentData.gender.trim() : '',
       bloodgroup: studentData.bloodgroup ? studentData.bloodgroup.trim() : '',
+      teamType: 'per_head',
+      teamName: '',
+      teamSize: 1,
+      teamMembers: [{
+        rNo: cleanRNo,
+        name: studentData.name.trim(),
+        email: studentData.email ? studentData.email.trim() : '',
+        branch: studentData.branch ? studentData.branch.trim() : 'N/A',
+        phone: studentData.phone ? String(studentData.phone).trim() : '',
+        gender: studentData.gender ? studentData.gender.trim() : '',
+        bloodgroup: studentData.bloodgroup ? studentData.bloodgroup.trim() : '',
+        isLeader: true
+      }],
       paymentStatus: isFree ? 'free' : 'pending',
     });
 
@@ -619,7 +851,7 @@ router.post('/:idOrSlug/register', async (req, res) => {
       isFree: isFree
     });
   } catch (error) {
-    console.error('Error saving club event registration:', error);
+    console.error('Error saving event registration:', error);
     if (error.code === 11000) {
       return res.status(409).json({ success: false, message: 'Student is already registered for this event.' });
     }
@@ -760,6 +992,8 @@ router.post('/:idOrSlug/record-payment', async (req, res) => {
       phone: registration.phone,
       amount: Number(event.amount) || 0,
       currency: 'INR',
+      teamName: registration.teamName || '',
+      teamSize: registration.teamSize || 1,
       razorpayOrderId: razorpay_order_id || null,
       razorpayPaymentId: paymentTxnId,
       razorpaySignature: razorpay_signature || null,
@@ -885,7 +1119,7 @@ router.post('/verify-razorpay-sync', async (req, res) => {
       paymentData = allPayments.find(p => {
         const notesRoll = p.notes && (p.notes.rollNo || p.notes.rNo);
         return (p.status === 'captured' || p.status === 'authorized') &&
-               notesRoll && String(notesRoll).toUpperCase().trim() === cleanRNo;
+          notesRoll && String(notesRoll).toUpperCase().trim() === cleanRNo;
       });
     }
 
@@ -982,7 +1216,7 @@ router.post('/sync-all-pending', async (req, res) => {
       const match = allPayments.find(p => {
         const notesRoll = p.notes && (p.notes.rollNo || p.notes.rNo);
         return (p.status === 'captured' || p.status === 'authorized') &&
-               notesRoll && String(notesRoll).toUpperCase().trim() === cleanRNo;
+          notesRoll && String(notesRoll).toUpperCase().trim() === cleanRNo;
       });
 
       if (match) {
