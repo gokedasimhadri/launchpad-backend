@@ -95,6 +95,33 @@ const clubEventRegistrationSchema = new mongoose.Schema(
       type: Number,
       default: 1,
     },
+    couponCode: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    couponSentAt: {
+      type: Date,
+      default: null,
+    },
+    couponSentStatus: {
+      type: String,
+      enum: ['pending', 'sent', 'failed'],
+      default: 'pending',
+    },
+    attendanceStatus: {
+      type: String,
+      enum: ['pending', 'present', 'absent'],
+      default: 'pending',
+    },
+    attendedAt: {
+      type: Date,
+      default: null,
+    },
+    attendanceMarkedBy: {
+      type: String,
+      default: '',
+    },
     teamMembers: [
       {
         rNo: { type: String, trim: true, uppercase: true },
@@ -105,6 +132,12 @@ const clubEventRegistrationSchema = new mongoose.Schema(
         gender: { type: String, trim: true, default: '' },
         bloodgroup: { type: String, trim: true, default: '' },
         isLeader: { type: Boolean, default: false },
+        couponCode: { type: String, trim: true, default: '' },
+        couponSentAt: { type: Date, default: null },
+        couponSentStatus: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
+        attendanceStatus: { type: String, enum: ['pending', 'present', 'absent'], default: 'pending' },
+        attendedAt: { type: Date, default: null },
+        attendanceMarkedBy: { type: String, default: '' },
       }
     ],
   },
@@ -114,6 +147,8 @@ const clubEventRegistrationSchema = new mongoose.Schema(
 // Prevent duplicate registration for the same student in the same event
 clubEventRegistrationSchema.index({ eventId: 1, rNo: 1 }, { unique: true });
 clubEventRegistrationSchema.index({ eventId: 1, 'teamMembers.rNo': 1 });
+clubEventRegistrationSchema.index({ couponCode: 1 });
+clubEventRegistrationSchema.index({ 'teamMembers.couponCode': 1 });
 
 // Explicit collection name 'clubeventregistrations'
 module.exports = mongoose.model('ClubEventRegistration', clubEventRegistrationSchema, 'clubeventregistrations');

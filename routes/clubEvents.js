@@ -3,6 +3,7 @@ const router = express.Router();
 const ClubEvent = require('../models/ClubEvent');
 const ClubEventRegistration = require('../models/ClubEventRegistration');
 const ClubEventPayment = require('../models/ClubEventPayment');
+const emailService = require('../services/emailService');
 
 // Helper to sanitize slug
 const sanitizeSlug = (slug) => {
@@ -145,6 +146,634 @@ router.get('/registrations', async (req, res) => {
   } catch (error) {
     console.error('Error fetching all registrations:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch registrations', error: error.message });
+  }
+});
+
+// Helper to generate unique coupon code event-wise
+const generateUniqueCouponCode = (eventName, rNo) => {
+  const cleanName = (eventName || 'EVENT').replace(/[^a-zA-Z0-9\s]/g, '').trim();
+  const words = cleanName.split(/\s+/).filter(Boolean);
+  let prefix = '';
+  if (words.length >= 2) {
+    prefix = words.slice(0, 3).map(w => w[0].toUpperCase()).join('');
+  } else if (words.length === 1 && words[0].length >= 3) {
+    prefix = words[0].substring(0, 4).toUpperCase();
+  } else {
+    prefix = 'EVT';
+  }
+  const cleanRNo = (rNo || 'STU').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+  return `AU-${prefix}-${cleanRNo}-${randomSuffix}`;
+};
+
+// GET /api/club-events/coupons - List all paid students event-wise and guarantee unique coupon codes
+router.get('/coupons', async (req, res) => {
+  try {
+    const { eventId, search, sentStatus } = req.query;
+    const query = { paymentStatus: 'paid' };
+
+    if (eventId && eventId !== 'all') {
+      if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
+        query.eventId = eventId;
+      } else {
+        query.eventSlug = eventId.toLowerCase();
+      }
+    }
+
+    const registrations = await ClubEventRegistration.find(query).sort({ createdAt: -1 });
+
+    // Ensure all paid members have unique coupon codes generated and persisted
+    for (const reg of registrations) {
+      let modified = false;
+      if (Array.isArray(reg.teamMembers) && reg.teamMembers.length > 0) {
+        for (const member of reg.teamMembers) {
+          if (!member.couponCode) {
+            member.couponCode = generateUniqueCouponCode(reg.eventName, member.rNo);
+            member.couponSentStatus = member.couponSentStatus || 'pending';
+            modified = true;
+          }
+        }
+        if (!reg.couponCode && reg.teamMembers[0]) {
+          reg.couponCode = reg.teamMembers[0].couponCode;
+          modified = true;
+        }
+      } else {
+        if (!reg.couponCode) {
+          reg.couponCode = generateUniqueCouponCode(reg.eventName, reg.rNo);
+          reg.couponSentStatus = reg.couponSentStatus || 'pending';
+          modified = true;
+        }
+      }
+      if (modified) {
+        await reg.save();
+      }
+    }
+
+    // Flatten into individual participant rows for event-wise viewing
+    let flatList = [];
+    registrations.forEach(reg => {
+      if (Array.isArray(reg.teamMembers) && reg.teamMembers.length > 0) {
+        reg.teamMembers.forEach(member => {
+          flatList.push({
+            id: `${reg._id}_${member._id || member.rNo}`,
+            registrationId: reg._id.toString(),
+            memberId: member._id ? member._id.toString() : null,
+            eventId: reg.eventId ? reg.eventId.toString() : '',
+            eventName: reg.eventName,
+            eventSlug: reg.eventSlug,
+            teamName: reg.teamName || '',
+            teamType: reg.teamType || 'per_team',
+            teamSize: reg.teamSize || reg.teamMembers.length,
+            isLeader: Boolean(member.isLeader || member.rNo === reg.rNo),
+            rNo: member.rNo,
+            name: member.name,
+            email: member.email || (member.rNo === reg.rNo ? reg.email : ''),
+            phone: member.phone || (member.rNo === reg.rNo ? reg.phone : ''),
+            branch: member.branch || reg.branch || 'N/A',
+            gender: member.gender || reg.gender || '',
+            bloodgroup: member.bloodgroup || '',
+            paymentStatus: reg.paymentStatus,
+            amountPaid: reg.amountPaid,
+            transactionId: reg.transactionId || reg.razorpayPaymentId || '',
+            couponCode: member.couponCode || '',
+            couponSentAt: member.couponSentAt || null,
+            couponSentStatus: member.couponSentStatus || 'pending',
+            attendanceStatus: member.attendanceStatus || 'pending',
+            attendedAt: member.attendedAt || null,
+            attendanceMarkedBy: member.attendanceMarkedBy || '',
+            registeredAt: reg.createdAt,
+          });
+        });
+      } else {
+        flatList.push({
+          id: `${reg._id}_solo`,
+          registrationId: reg._id.toString(),
+          memberId: null,
+          eventId: reg.eventId ? reg.eventId.toString() : '',
+          eventName: reg.eventName,
+          eventSlug: reg.eventSlug,
+          teamName: '',
+          teamType: 'per_head',
+          teamSize: 1,
+          isLeader: true,
+          rNo: reg.rNo,
+          name: reg.name,
+          email: reg.email,
+          phone: reg.phone,
+          branch: reg.branch || 'N/A',
+          gender: reg.gender || '',
+          bloodgroup: reg.bloodgroup || '',
+          paymentStatus: reg.paymentStatus,
+          amountPaid: reg.amountPaid,
+          transactionId: reg.transactionId || reg.razorpayPaymentId || '',
+          couponCode: reg.couponCode || '',
+          couponSentAt: reg.couponSentAt || null,
+          couponSentStatus: reg.couponSentStatus || 'pending',
+          attendanceStatus: reg.attendanceStatus || 'pending',
+          attendedAt: reg.attendedAt || null,
+          attendanceMarkedBy: reg.attendanceMarkedBy || '',
+          registeredAt: reg.createdAt,
+        });
+      }
+    });
+
+    // Compute all events list for dropdown
+    const allPaidRegs = await ClubEventRegistration.find({ paymentStatus: 'paid' }).lean();
+    const eventCountsMap = new Map();
+    allPaidRegs.forEach(r => {
+      const eId = r.eventId ? r.eventId.toString() : r.eventSlug;
+      const count = Array.isArray(r.teamMembers) && r.teamMembers.length > 0 ? r.teamMembers.length : 1;
+      if (!eventCountsMap.has(eId)) {
+        eventCountsMap.set(eId, {
+          eventId: eId,
+          eventName: r.eventName,
+          count: count
+        });
+      } else {
+        const item = eventCountsMap.get(eId);
+        item.count += count;
+      }
+    });
+    const distinctEvents = Array.from(eventCountsMap.values());
+
+    const totalCount = flatList.length;
+    const sentCount = flatList.filter(item => item.couponSentStatus === 'sent').length;
+    const pendingCount = totalCount - sentCount;
+
+    // Filter by search query if provided
+    if (search && search.trim()) {
+      const q = search.trim().toLowerCase();
+      flatList = flatList.filter(item => {
+        return (
+          (item.rNo && item.rNo.toLowerCase().includes(q)) ||
+          (item.name && item.name.toLowerCase().includes(q)) ||
+          (item.email && item.email.toLowerCase().includes(q)) ||
+          (item.couponCode && item.couponCode.toLowerCase().includes(q)) ||
+          (item.eventName && item.eventName.toLowerCase().includes(q)) ||
+          (item.teamName && item.teamName.toLowerCase().includes(q)) ||
+          (item.branch && item.branch.toLowerCase().includes(q))
+        );
+      });
+    }
+
+    // Filter by sentStatus
+    if (sentStatus && sentStatus !== 'all') {
+      if (sentStatus === 'sent') {
+        flatList = flatList.filter(item => item.couponSentStatus === 'sent');
+      } else if (sentStatus === 'pending') {
+        flatList = flatList.filter(item => item.couponSentStatus !== 'sent');
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      count: flatList.length,
+      data: flatList,
+      stats: {
+        total: totalCount,
+        sent: sentCount,
+        pending: pendingCount,
+      },
+      events: distinctEvents
+    });
+  } catch (error) {
+    console.error('Error fetching paid coupons:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch coupons', error: error.message });
+  }
+});
+
+// POST /api/club-events/coupons/send-single - Send coupon email to a single paid team member
+router.post('/coupons/send-single', async (req, res) => {
+  try {
+    const { registrationId, memberId, email, couponCode, studentName, eventName, rNo, branch, teamName, isLeader } = req.body;
+
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'A valid email address is required.' });
+    }
+
+    const reg = await ClubEventRegistration.findById(registrationId);
+    if (!reg) {
+      return res.status(404).json({ success: false, message: 'Registration not found' });
+    }
+
+    // Send email via emailService
+    const emailResult = await emailService.sendCouponEmail({
+      to: email,
+      studentName: studentName || reg.name,
+      rNo: rNo || reg.rNo,
+      branch: branch || reg.branch,
+      eventName: eventName || reg.eventName,
+      teamName: teamName || reg.teamName,
+      couponCode: couponCode || reg.couponCode,
+      isLeader: Boolean(isLeader)
+    });
+
+    // Update sent status in DB
+    const now = new Date();
+    if (memberId && Array.isArray(reg.teamMembers)) {
+      const sub = reg.teamMembers.id(memberId) || reg.teamMembers.find(m => m.rNo === rNo);
+      if (sub) {
+        sub.couponSentAt = now;
+        sub.couponSentStatus = 'sent';
+      }
+    }
+    if (reg.rNo === rNo || !memberId) {
+      reg.couponSentAt = now;
+      reg.couponSentStatus = 'sent';
+    }
+    await reg.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Coupon successfully emailed to ${email}!`,
+      previewUrl: emailResult.previewUrl || null,
+      isEthereal: emailResult.isEthereal || false,
+      isMock: emailResult.isMock || false,
+      sentAt: now
+    });
+  } catch (error) {
+    console.error('Error sending single coupon email:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to send coupon email' });
+  }
+});
+
+// POST /api/club-events/coupons/bulk-send - Send coupon emails to all selected or all paid students
+router.post('/coupons/bulk-send', async (req, res) => {
+  try {
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'No students provided for bulk email sending.' });
+    }
+
+    let successCount = 0;
+    let failedCount = 0;
+    const results = [];
+
+    for (const item of items) {
+      try {
+        if (!item.email || !item.email.includes('@')) {
+          failedCount++;
+          results.push({ rNo: item.rNo, name: item.name, success: false, error: 'Invalid or missing email' });
+          continue;
+        }
+
+        const sendResult = await emailService.sendCouponEmail({
+          to: item.email,
+          studentName: item.name,
+          rNo: item.rNo,
+          branch: item.branch,
+          eventName: item.eventName,
+          teamName: item.teamName,
+          couponCode: item.couponCode,
+          isLeader: item.isLeader
+        });
+
+        // Update database
+        const reg = await ClubEventRegistration.findById(item.registrationId);
+        if (reg) {
+          const now = new Date();
+          if (item.memberId && Array.isArray(reg.teamMembers)) {
+            const sub = reg.teamMembers.id(item.memberId) || reg.teamMembers.find(m => m.rNo === item.rNo);
+            if (sub) {
+              sub.couponSentAt = now;
+              sub.couponSentStatus = 'sent';
+            }
+          }
+          if (reg.rNo === item.rNo || !item.memberId) {
+            reg.couponSentAt = now;
+            reg.couponSentStatus = 'sent';
+          }
+          await reg.save();
+        }
+
+        successCount++;
+        results.push({
+          rNo: item.rNo,
+          name: item.name,
+          email: item.email,
+          couponCode: item.couponCode,
+          success: true,
+          previewUrl: sendResult.previewUrl
+        });
+
+        // Polite delay between mail sends to avoid throttling (150ms)
+        await new Promise(r => setTimeout(r, 150));
+      } catch (itemErr) {
+        console.error(`Bulk send error for ${item.rNo}:`, itemErr);
+        failedCount++;
+        results.push({ rNo: item.rNo, name: item.name, success: false, error: itemErr.message });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Bulk coupon email process completed! Sent: ${successCount}, Failed: ${failedCount}`,
+      summary: { total: items.length, sent: successCount, failed: failedCount },
+      results
+    });
+  } catch (error) {
+    console.error('Error in bulk sending coupons:', error);
+    res.status(500).json({ success: false, message: 'Failed to process bulk email sending', error: error.message });
+  }
+});
+
+// POST /api/club-events/coupons/regenerate - Regenerate coupon code for a student
+router.post('/coupons/regenerate', async (req, res) => {
+  try {
+    const { registrationId, memberId, rNo, eventName } = req.body;
+    const reg = await ClubEventRegistration.findById(registrationId);
+    if (!reg) {
+      return res.status(404).json({ success: false, message: 'Registration not found' });
+    }
+
+    const newCode = generateUniqueCouponCode(eventName || reg.eventName, rNo || reg.rNo);
+
+    if (memberId && Array.isArray(reg.teamMembers)) {
+      const sub = reg.teamMembers.id(memberId) || reg.teamMembers.find(m => m.rNo === rNo);
+      if (sub) {
+        sub.couponCode = newCode;
+        sub.couponSentStatus = 'pending';
+      }
+    }
+    if (reg.rNo === rNo || !memberId) {
+      reg.couponCode = newCode;
+      reg.couponSentStatus = 'pending';
+    }
+
+    await reg.save();
+
+    res.status(200).json({
+      success: true,
+      message: `New coupon code generated: ${newCode}`,
+      couponCode: newCode
+    });
+  } catch (error) {
+    console.error('Error regenerating coupon code:', error);
+    res.status(500).json({ success: false, message: 'Failed to regenerate coupon code', error: error.message });
+  }
+});
+
+// GET /api/club-events/coupons/download-pdf - Stream official PDF pass for download
+router.get('/coupons/download-pdf', async (req, res) => {
+  try {
+    const { registrationId, memberId, rNo } = req.query;
+    const QRCode = require('qrcode');
+
+    const reg = await ClubEventRegistration.findById(registrationId);
+    if (!reg) {
+      return res.status(404).send('Registration not found');
+    }
+
+    let target = null;
+    let isLeader = true;
+    if (memberId && Array.isArray(reg.teamMembers)) {
+      target = reg.teamMembers.id(memberId) || reg.teamMembers.find(m => m.rNo === rNo);
+      isLeader = Boolean(target && (target.isLeader || target.rNo === reg.rNo));
+    }
+    if (!target) {
+      target = {
+        name: reg.name,
+        rNo: reg.rNo,
+        branch: reg.branch,
+        couponCode: reg.couponCode
+      };
+      isLeader = true;
+    }
+
+    const couponCode = target.couponCode || reg.couponCode || 'AU-PASS';
+    const qrBuffer = await QRCode.toBuffer(couponCode, { width: 250, margin: 1 });
+
+    const pdfBuffer = await emailService.generateCouponPDFBuffer({
+      studentName: target.name,
+      rNo: target.rNo,
+      branch: target.branch || reg.branch,
+      eventName: reg.eventName,
+      teamName: reg.teamName,
+      couponCode: couponCode,
+      isLeader: isLeader,
+      qrBuffer: qrBuffer
+    });
+
+    const cleanRNo = String(target.rNo || 'student').replace(/[^a-zA-Z0-9]/g, '');
+    const cleanCoupon = String(couponCode).replace(/[^a-zA-Z0-9-]/g, '');
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Aditya_Event_Pass_${cleanRNo}_${cleanCoupon}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('Error generating PDF pass:', error);
+    res.status(500).send('Failed to generate PDF pass');
+  }
+});
+
+// GET /api/club-events/coupons/smtp-status - Check SMTP status
+router.get('/coupons/smtp-status', async (req, res) => {
+  try {
+    const status = await emailService.checkSmtpStatus();
+    res.status(200).json({ success: true, ...status });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// POST /api/club-events/coupons/verify-scan - Scan pass (QR / PDF / Code) and mark attendance as present
+router.post('/coupons/verify-scan', async (req, res) => {
+  try {
+    const { codeOrRollNo, eventId, markedBy } = req.body;
+
+    if (!codeOrRollNo || !codeOrRollNo.trim()) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid coupon code or roll number to scan.' });
+    }
+
+    const cleanInput = codeOrRollNo.trim().toUpperCase();
+
+    // Query: match couponCode or rNo in root or inside teamMembers
+    const query = {
+      paymentStatus: 'paid',
+      $or: [
+        { couponCode: cleanInput },
+        { rNo: cleanInput },
+        { 'teamMembers.couponCode': cleanInput },
+        { 'teamMembers.rNo': cleanInput },
+      ]
+    };
+
+    if (eventId && eventId !== 'all') {
+      if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
+        query.eventId = eventId;
+      } else {
+        query.eventSlug = eventId.toLowerCase();
+      }
+    }
+
+    const reg = await ClubEventRegistration.findOne(query);
+
+    if (!reg) {
+      // Check if an unpaid registration exists with this code/roll no
+      const unpaidReg = await ClubEventRegistration.findOne({
+        $or: [
+          { couponCode: cleanInput },
+          { rNo: cleanInput },
+          { 'teamMembers.couponCode': cleanInput },
+          { 'teamMembers.rNo': cleanInput },
+        ]
+      });
+
+      if (unpaidReg) {
+        return res.status(400).json({
+          success: false,
+          unpaid: true,
+          message: `Registration found for "${unpaidReg.eventName}", but payment status is "${unpaidReg.paymentStatus}". Attendance requires a verified PAID registration.`
+        });
+      }
+
+      return res.status(404).json({
+        success: false,
+        notFound: true,
+        message: `No paid registration pass found matching "${cleanInput}". Verify the pass and try again.`
+      });
+    }
+
+    // Identify the specific student / team member
+    let targetMember = null;
+    let isLeader = true;
+
+    if (Array.isArray(reg.teamMembers) && reg.teamMembers.length > 0) {
+      targetMember = reg.teamMembers.find(
+        m => (m.couponCode && m.couponCode.toUpperCase() === cleanInput) ||
+             (m.rNo && m.rNo.toUpperCase() === cleanInput)
+      );
+      if (targetMember) {
+        isLeader = Boolean(targetMember.isLeader || targetMember.rNo === reg.rNo);
+      }
+    }
+
+    // Solo fallback
+    if (!targetMember) {
+      targetMember = {
+        name: reg.name,
+        rNo: reg.rNo,
+        email: reg.email,
+        phone: reg.phone,
+        branch: reg.branch,
+        couponCode: reg.couponCode,
+        attendanceStatus: reg.attendanceStatus || 'pending',
+        attendedAt: reg.attendedAt,
+        attendanceMarkedBy: reg.attendanceMarkedBy
+      };
+      isLeader = true;
+    }
+
+    const alreadyPresent = targetMember.attendanceStatus === 'present';
+    const now = new Date();
+    const markerName = markedBy || 'Attendance Scanner';
+
+    if (!alreadyPresent) {
+      // Update attendance status in subdocument
+      if (Array.isArray(reg.teamMembers)) {
+        const sub = reg.teamMembers.find(
+          m => (m.couponCode && m.couponCode.toUpperCase() === cleanInput) ||
+               (m.rNo && m.rNo.toUpperCase() === cleanInput)
+        );
+        if (sub) {
+          sub.attendanceStatus = 'present';
+          sub.attendedAt = now;
+          sub.attendanceMarkedBy = markerName;
+        }
+      }
+
+      // If leader or solo registration
+      if (reg.rNo === targetMember.rNo || reg.couponCode === targetMember.couponCode || !reg.teamMembers?.length) {
+        reg.attendanceStatus = 'present';
+        reg.attendedAt = now;
+        reg.attendanceMarkedBy = markerName;
+      }
+
+      await reg.save();
+    }
+
+    const studentInfo = {
+      registrationId: reg._id.toString(),
+      memberId: targetMember._id ? targetMember._id.toString() : null,
+      name: targetMember.name || reg.name,
+      rNo: targetMember.rNo || reg.rNo,
+      branch: targetMember.branch || reg.branch || 'N/A',
+      email: targetMember.email || (isLeader ? reg.email : ''),
+      phone: targetMember.phone || (isLeader ? reg.phone : ''),
+      eventName: reg.eventName,
+      eventSlug: reg.eventSlug,
+      teamName: reg.teamName || '',
+      teamType: reg.teamType || 'per_team',
+      isLeader: isLeader,
+      couponCode: targetMember.couponCode || reg.couponCode,
+      attendanceStatus: 'present',
+      attendedAt: alreadyPresent ? targetMember.attendedAt : now,
+      attendanceMarkedBy: alreadyPresent ? targetMember.attendanceMarkedBy : markerName,
+      alreadyPresent: alreadyPresent
+    };
+
+    if (alreadyPresent) {
+      return res.status(200).json({
+        success: true,
+        alreadyPresent: true,
+        message: `Attendance was ALREADY marked for ${studentInfo.name} (${studentInfo.rNo}) at ${new Date(targetMember.attendedAt).toLocaleTimeString('en-IN')}`,
+        student: studentInfo
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      alreadyPresent: false,
+      message: `Verified! Attendance successfully marked as PRESENT for ${studentInfo.name} (${studentInfo.rNo}).`,
+      student: studentInfo
+    });
+  } catch (error) {
+    console.error('Error verifying attendance scan:', error);
+    res.status(500).json({ success: false, message: 'Server error while verifying scan', error: error.message });
+  }
+});
+
+// POST /api/club-events/coupons/toggle-attendance - Manually toggle attendance between present and pending
+router.post('/coupons/toggle-attendance', async (req, res) => {
+  try {
+    const { registrationId, memberId, rNo, status } = req.body;
+    const newStatus = status === 'present' ? 'present' : 'pending';
+
+    const reg = await ClubEventRegistration.findById(registrationId);
+    if (!reg) {
+      return res.status(404).json({ success: false, message: 'Registration not found' });
+    }
+
+    const now = newStatus === 'present' ? new Date() : null;
+    const marker = newStatus === 'present' ? 'Manual Coordinator' : '';
+
+    if (memberId && Array.isArray(reg.teamMembers)) {
+      const sub = reg.teamMembers.id(memberId) || reg.teamMembers.find(m => m.rNo === rNo);
+      if (sub) {
+        sub.attendanceStatus = newStatus;
+        sub.attendedAt = now;
+        sub.attendanceMarkedBy = marker;
+      }
+    }
+
+    if (reg.rNo === rNo || !memberId) {
+      reg.attendanceStatus = newStatus;
+      reg.attendedAt = now;
+      reg.attendanceMarkedBy = marker;
+    }
+
+    await reg.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Attendance status updated to ${newStatus.toUpperCase()}`,
+      attendanceStatus: newStatus,
+      attendedAt: now
+    });
+  } catch (error) {
+    console.error('Error toggling attendance:', error);
+    res.status(500).json({ success: false, message: 'Failed to update attendance', error: error.message });
   }
 });
 
