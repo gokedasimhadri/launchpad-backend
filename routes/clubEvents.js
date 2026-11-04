@@ -15,11 +15,40 @@ const sanitizeSlug = (slug) => {
     .replace(/^-|-$/g, '');
 };
 
-// GET /api/club-events - List all events with optional filters
+// GET /api/club-events/roles - List all unique event roles
+router.get('/roles', async (req, res) => {
+  try {
+    const roles = await ClubEvent.distinct('role');
+    const cleanRoles = roles
+      .filter(r => r && typeof r === 'string' && r.trim().length > 0)
+      .map(r => r.trim());
+
+    // Deduplicate case-insensitively while preserving formatting
+    const uniqueMap = new Map();
+    cleanRoles.forEach(r => {
+      const lower = r.toLowerCase();
+      if (!uniqueMap.has(lower)) {
+        uniqueMap.set(lower, r);
+      }
+    });
+
+    res.status(200).json({ success: true, data: Array.from(uniqueMap.values()).sort() });
+  } catch (error) {
+    console.error('Error fetching roles:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch roles', error: error.message });
+  }
+});
+
+// GET /api/club-events - List all events with optional filters (status, registration, search, role)
 router.get('/', async (req, res) => {
   try {
-    const { status, registration, search } = req.query;
+    const { status, registration, search, role } = req.query;
     const query = {};
+
+    // Filter by role if specified and not 'all' or 'dean'
+    if (role && role !== 'all' && role.toLowerCase() !== 'dean') {
+      query.role = new RegExp(`^${role.trim()}$`, 'i');
+    }
 
     if (status && status !== 'all') {
       query.status = status.toLowerCase();
@@ -31,7 +60,7 @@ router.get('/', async (req, res) => {
 
     if (search && search.trim()) {
       const searchRegex = new RegExp(search.trim(), 'i');
-      query.$or = [{ name: searchRegex }, { slug_link: searchRegex }];
+      query.$or = [{ name: searchRegex }, { slug_link: searchRegex }, { role: searchRegex }];
     }
 
     const events = await ClubEvent.find(query).sort({ createdAt: -1 });
@@ -45,44 +74,64 @@ router.get('/', async (req, res) => {
 // GET /api/club-events/registrations - List all registrations across all club events with filters and linked payment info
 router.get('/registrations', async (req, res) => {
   try {
-    const { eventId, search, status, branch } = req.query;
-    const query = {};
+    const { eventId, search, status, branch, role } = req.query;
+    const andClauses = [];
+
+    let roleEventIds = [];
+    let roleEventSlugs = [];
+
+    // Role-based scoping for non-dean / specified role
+    if (role && role !== 'all' && role.toLowerCase() !== 'dean') {
+      const roleEvents = await ClubEvent.find({ role: new RegExp(`^${role.trim()}$`, 'i') }, '_id slug_link');
+      roleEventIds = roleEvents.map(e => e._id.toString());
+      roleEventSlugs = roleEvents.map(e => (e.slug_link || '').toLowerCase());
+
+      andClauses.push({
+        $or: [
+          { eventId: { $in: roleEventIds } },
+          { eventSlug: { $in: roleEventSlugs } }
+        ]
+      });
+    }
 
     if (eventId && eventId !== 'all') {
       if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
-        query.eventId = eventId;
+        andClauses.push({ eventId: eventId });
       } else {
-        query.eventSlug = eventId.toLowerCase();
+        andClauses.push({ eventSlug: eventId.toLowerCase() });
       }
     }
 
     if (status && status !== 'all') {
-      query.paymentStatus = status.toLowerCase();
+      andClauses.push({ paymentStatus: status.toLowerCase() });
     }
 
     if (branch && branch !== 'all') {
-      query.branch = new RegExp(`^${branch.trim()}$`, 'i');
+      andClauses.push({ branch: new RegExp(`^${branch.trim()}$`, 'i') });
     }
 
     if (search && search.trim()) {
       const searchRegex = new RegExp(search.trim(), 'i');
-      query.$or = [
-        { rNo: searchRegex },
-        { name: searchRegex },
-        { email: searchRegex },
-        { phone: searchRegex },
-        { eventName: searchRegex },
-        { transactionId: searchRegex },
-        { razorpayPaymentId: searchRegex },
-        { razorpayOrderId: searchRegex },
-      ];
+      andClauses.push({
+        $or: [
+          { rNo: searchRegex },
+          { name: searchRegex },
+          { email: searchRegex },
+          { phone: searchRegex },
+          { eventName: searchRegex },
+          { transactionId: searchRegex },
+          { razorpayPaymentId: searchRegex },
+          { razorpayOrderId: searchRegex },
+        ]
+      });
     }
 
+    const query = andClauses.length > 0 ? { $and: andClauses } : {};
     const rawRegistrations = await ClubEventRegistration.find(query).sort({ createdAt: -1 }).lean();
 
     // Fetch payments to attach accurate payment information from 'clubeventrpayments'
-    const eventIds = rawRegistrations.map(r => r.eventId);
-    const rNos = rawRegistrations.map(r => r.rNo);
+    const eventIds = rawRegistrations.map(r => r.eventId).filter(Boolean);
+    const rNos = rawRegistrations.map(r => r.rNo).filter(Boolean);
     const payments = await ClubEventPayment.find({
       eventId: { $in: eventIds },
       rNo: { $in: rNos }
@@ -91,7 +140,7 @@ router.get('/registrations', async (req, res) => {
     // Map payments by eventId + rNo
     const paymentMap = new Map();
     payments.forEach(p => {
-      const key = `${p.eventId.toString()}_${p.rNo.toUpperCase()}`;
+      const key = `${p.eventId ? p.eventId.toString() : ''}_${(p.rNo || '').toUpperCase()}`;
       // Keep the latest or paid one
       if (!paymentMap.has(key) || p.paymentStatus === 'paid') {
         paymentMap.set(key, p);
@@ -100,7 +149,7 @@ router.get('/registrations', async (req, res) => {
 
     // Merge payment details into each registration object
     const registrations = rawRegistrations.map(r => {
-      const key = `${r.eventId.toString()}_${r.rNo.toUpperCase()}`;
+      const key = `${r.eventId ? r.eventId.toString() : ''}_${(r.rNo || '').toUpperCase()}`;
       const payment = paymentMap.get(key);
       if (payment) {
         return {
@@ -116,9 +165,28 @@ router.get('/registrations', async (req, res) => {
       return r;
     });
 
-    // Compute stats across all registrations and payments
-    const allRegistrations = await ClubEventRegistration.find({}).lean();
-    const allPayments = await ClubEventPayment.find({ paymentStatus: 'paid' }).lean();
+    // Compute stats across registrations and payments (scoped to role if applicable)
+    let statsQuery = {};
+    let paymentStatsQuery = { paymentStatus: 'paid' };
+
+    if (roleEventIds.length > 0 || roleEventSlugs.length > 0) {
+      statsQuery = {
+        $or: [
+          { eventId: { $in: roleEventIds } },
+          { eventSlug: { $in: roleEventSlugs } }
+        ]
+      };
+      paymentStatsQuery = {
+        paymentStatus: 'paid',
+        $or: [
+          { eventId: { $in: roleEventIds } },
+          { eventSlug: { $in: roleEventSlugs } }
+        ]
+      };
+    }
+
+    const allRegistrations = await ClubEventRegistration.find(statsQuery).lean();
+    const allPayments = await ClubEventPayment.find(paymentStatsQuery).lean();
 
     const totalCount = allRegistrations.length;
     const paidCount = allRegistrations.filter(r => r.paymentStatus === 'paid').length;
@@ -169,17 +237,35 @@ const generateUniqueCouponCode = (eventName, rNo) => {
 // GET /api/club-events/coupons - List all paid students event-wise and guarantee unique coupon codes
 router.get('/coupons', async (req, res) => {
   try {
-    const { eventId, search, sentStatus } = req.query;
-    const query = { paymentStatus: 'paid' };
+    const { eventId, search, sentStatus, role } = req.query;
+    const andClauses = [{ paymentStatus: 'paid' }];
+
+    let roleEventIds = [];
+    let roleEventSlugs = [];
+
+    // Role-based scoping
+    if (role && role !== 'all' && role.toLowerCase() !== 'dean') {
+      const roleEvents = await ClubEvent.find({ role: new RegExp(`^${role.trim()}$`, 'i') }, '_id slug_link name');
+      roleEventIds = roleEvents.map(e => e._id.toString());
+      roleEventSlugs = roleEvents.map(e => (e.slug_link || '').toLowerCase());
+
+      andClauses.push({
+        $or: [
+          { eventId: { $in: roleEventIds } },
+          { eventSlug: { $in: roleEventSlugs } }
+        ]
+      });
+    }
 
     if (eventId && eventId !== 'all') {
       if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
-        query.eventId = eventId;
+        andClauses.push({ eventId: eventId });
       } else {
-        query.eventSlug = eventId.toLowerCase();
+        andClauses.push({ eventSlug: eventId.toLowerCase() });
       }
     }
 
+    const query = andClauses.length > 0 ? { $and: andClauses } : { paymentStatus: 'paid' };
     const registrations = await ClubEventRegistration.find(query).sort({ createdAt: -1 });
 
     // Ensure all paid members have unique coupon codes generated and persisted
@@ -277,8 +363,18 @@ router.get('/coupons', async (req, res) => {
       }
     });
 
-    // Compute all events list for dropdown
-    const allPaidRegs = await ClubEventRegistration.find({ paymentStatus: 'paid' }).lean();
+    // Compute all events list for dropdown (scoped to role if applicable)
+    let paidRegsQuery = { paymentStatus: 'paid' };
+    if (roleEventIds.length > 0 || roleEventSlugs.length > 0) {
+      paidRegsQuery = {
+        paymentStatus: 'paid',
+        $or: [
+          { eventId: { $in: roleEventIds } },
+          { eventSlug: { $in: roleEventSlugs } }
+        ]
+      };
+    }
+    const allPaidRegs = await ClubEventRegistration.find(paidRegsQuery).lean();
     const eventCountsMap = new Map();
     allPaidRegs.forEach(r => {
       const eId = r.eventId ? r.eventId.toString() : r.eventSlug;

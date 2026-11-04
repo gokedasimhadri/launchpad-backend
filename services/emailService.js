@@ -110,14 +110,15 @@ const getTransporter = async () => {
 const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, teamName, couponCode, isLeader, qrBuffer }) => {
   return new Promise((resolve, reject) => {
     try {
+      const fs = require('fs');
       const doc = new PDFDocument({
         size: 'A4',
-        margin: 40,
+        margin: 36,
         compress: false,
         info: {
           Title: `Aditya University Event Pass - ${couponCode}`,
           Author: 'Aditya University',
-          Subject: `${eventName} Admit Pass`,
+          Subject: `${eventName} Official Admit Pass`,
         }
       });
 
@@ -127,178 +128,177 @@ const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, te
       doc.on('error', reject);
 
       const pageWidth = doc.page.width; // 595.28 for A4
-      const cardX = 40;
-      const cardY = 50;
-      const cardWidth = pageWidth - 80; // 515.28
-      const cardHeight = 440;
+      const cardWidth = 510;
+      const cardX = (pageWidth - cardWidth) / 2; // 42.64 (centered)
+      const cardStartY = 38;
 
-      // 1. Draw Ticket Card Container Outer Border
+      const cleanEventName = String(eventName || 'Aditya University Event').trim();
+      const cleanStudentName = String(studentName || 'Student').trim();
+      const cleanRNo = String(rNo || '').trim().toUpperCase();
+      const cleanBranch = String(branch || 'General').trim();
+      const roleText = teamName
+        ? `${teamName} (${isLeader ? 'Leader' : 'Member'})`
+        : (isLeader ? 'Individual Participant' : 'Team Member');
+
+      // Dynamically calculate event title height
+      doc.font('Helvetica-Bold').fontSize(16);
+      const eventTitleH = Math.max(22, doc.heightOfString(cleanEventName, { width: cardWidth - 48 }));
+
+      const headerHeight = 72;
+      const detailsBoxHeight = 78;
+      const couponStripHeight = 114;
+      const footerHeight = 32;
+      const cardHeight = headerHeight + 16 + eventTitleH + 12 + detailsBoxHeight + 14 + couponStripHeight + footerHeight;
+
+      // 1. Draw Outer Card Container
       doc.save();
-      doc.roundedRect(cardX, cardY, cardWidth, cardHeight, 16)
-         .lineWidth(1.5)
-         .strokeColor('#CBD5E1')
-         .fillColor('#FFFFFF')
-         .fillAndStroke();
+      doc.roundedRect(cardX, cardStartY, cardWidth, cardHeight, 14)
+        .lineWidth(1.5)
+        .strokeColor('#CBD5E1')
+        .fillColor('#FFFFFF')
+        .fillAndStroke();
       doc.restore();
 
-      // 2. Ticket Header Strip (Deep Navy #0F172A)
+      // 2. Ticket Header Strip (Deep Navy #0B1329)
       doc.save();
-      doc.roundedRect(cardX, cardY, cardWidth, 80, 16)
-         .clip();
-      doc.rect(cardX, cardY, cardWidth, 80)
-         .fillColor('#0F172A')
-         .fill();
-      // Amber Gold Accent line at bottom of header
-      doc.rect(cardX, cardY + 77, cardWidth, 3)
-         .fillColor('#F59E0B')
-         .fill();
+      doc.roundedRect(cardX, cardStartY, cardWidth, headerHeight, 14).clip();
+      doc.rect(cardX, cardStartY, cardWidth, headerHeight).fillColor('#0B1329').fill();
+      doc.rect(cardX, cardStartY + headerHeight - 3.5, cardWidth, 3.5).fillColor('#F59E0B').fill();
       doc.restore();
 
-      // University Title & Subtitle
-      doc.fillColor('#F59E0B')
-         .font('Helvetica-Bold')
-         .fontSize(18)
-         .text('ADITYA UNIVERSITY', cardX + 24, cardY + 22);
+      // Logo or University Name
+      const logoPath = path.join(__dirname, '../public/images/logo.png');
+      if (fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, cardX + 18, cardStartY + 14, { height: 42 });
+        } catch {
+          doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(16).text('ADITYA UNIVERSITY', cardX + 22, cardStartY + 20);
+          doc.fillColor('#CBD5E1').font('Helvetica').fontSize(9).text('OFFICIAL EVENT PASS', cardX + 22, cardStartY + 42);
+        }
+      } else {
+        doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(16).text('ADITYA UNIVERSITY', cardX + 22, cardStartY + 20);
+        doc.fillColor('#CBD5E1').font('Helvetica').fontSize(9).text('OFFICIAL EVENT PASS', cardX + 22, cardStartY + 42);
+      }
 
-      doc.fillColor('#CBD5E1')
-         .font('Helvetica')
-         .fontSize(9.5)
-         .text('OFFICIAL EVENT ENTRY & ATTENDANCE PASS', cardX + 24, cardY + 46);
-
-      // Verified Badge on Top Right
-      const badgeWidth = 140;
-      const badgeX = cardX + cardWidth - badgeWidth - 24;
-      const badgeY = cardY + 26;
+      // Verified Badge Top Right
+      const badgeW = 126;
+      const badgeH = 24;
+      const badgeX = cardX + cardWidth - badgeW - 18;
+      const badgeY = cardStartY + 23;
       doc.save();
-      doc.roundedRect(badgeX, badgeY, badgeWidth, 26, 13)
-         .lineWidth(1)
-         .strokeColor('#F59E0B')
-         .fillColor('#1E293B')
-         .fillAndStroke();
-      doc.fillColor('#FBBF24')
-         .font('Helvetica-Bold')
-         .fontSize(8.5)
-         .text('VERIFIED & PAID ENTRY', badgeX, badgeY + 8, { width: badgeWidth, align: 'center' });
+      doc.roundedRect(badgeX, badgeY, badgeW, badgeH, 12)
+        .lineWidth(1)
+        .strokeColor('#F59E0B')
+        .fillColor('#1E293B')
+        .fillAndStroke();
+      doc.fillColor('#FBBF24').font('Helvetica-Bold').fontSize(8).text('VERIFIED & PAID', badgeX, badgeY + 7, { width: badgeW, align: 'center' });
       doc.restore();
 
       // 3. Event Title
-      const contentY = cardY + 98;
-      doc.fillColor('#0F172A')
-         .font('Helvetica-Bold')
-         .fontSize(20)
-         .text(eventName, cardX + 24, contentY, { width: cardWidth - 48 });
+      const titleY = cardStartY + headerHeight + 14;
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(16).text(cleanEventName, cardX + 24, titleY, { width: cardWidth - 48, lineGap: 2 });
 
-      // 4. Details Box (Grey background with neat 2-column key-values)
-      const detailsBoxY = contentY + 36;
-      const detailsBoxHeight = 84;
+      // 4. Details Box
+      const detailsY = titleY + eventTitleH + 12;
       doc.save();
-      doc.roundedRect(cardX + 24, detailsBoxY, cardWidth - 48, detailsBoxHeight, 10)
-         .fillColor('#F8FAFC')
-         .strokeColor('#E2E8F0')
-         .lineWidth(1)
-         .fillAndStroke();
+      doc.roundedRect(cardX + 20, detailsY, cardWidth - 40, detailsBoxHeight, 8)
+        .fillColor('#F8FAFC')
+        .strokeColor('#E2E8F0')
+        .lineWidth(1)
+        .fillAndStroke();
       doc.restore();
 
-      const col1X = cardX + 40;
+      const col1X = cardX + 32;
       const col2X = cardX + (cardWidth / 2) + 10;
-      const row1Y = detailsBoxY + 14;
-      const row2Y = detailsBoxY + 48;
+      const row1Y = detailsY + 11;
+      const row2Y = detailsY + 44;
+      const colWidth = (cardWidth / 2) - 30;
 
       // Col 1, Row 1: Participant Name
-      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(8).text('PARTICIPANT NAME', col1X, row1Y);
-      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(12).text(studentName, col1X, row1Y + 12);
+      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(7.5).text('PARTICIPANT NAME', col1X, row1Y);
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(11).text(cleanStudentName, col1X, row1Y + 10, { width: colWidth, ellipsis: true });
 
       // Col 2, Row 1: Roll Number
-      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(8).text('ROLL NUMBER', col2X, row1Y);
-      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(12).text(rNo, col2X, row1Y + 12);
+      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(7.5).text('ROLL NUMBER', col2X, row1Y);
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(11).text(cleanRNo, col2X, row1Y + 10, { width: colWidth, ellipsis: true });
 
       // Col 1, Row 2: Branch
-      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(8).text('BRANCH / DEPARTMENT', col1X, row2Y);
-      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(11).text(branch || 'General', col1X, row2Y + 12);
+      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(7.5).text('BRANCH / DEPARTMENT', col1X, row2Y);
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(10).text(cleanBranch, col1X, row2Y + 10, { width: colWidth, ellipsis: true });
 
       // Col 2, Row 2: Role / Team
-      const roleText = teamName ? `${teamName} (${isLeader ? 'Leader' : 'Member'})` : (isLeader ? 'Individual Participant' : 'Team Member');
-      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(8).text('REGISTRATION ROLE', col2X, row2Y);
-      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(11).text(roleText, col2X, row2Y + 12);
+      doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(7.5).text('REGISTRATION ROLE', col2X, row2Y);
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(10).text(roleText, col2X, row2Y + 10, { width: colWidth, ellipsis: true });
 
-      // 5. Coupon Voucher Strip (Light Blue background with dashed border)
-      const couponStripY = detailsBoxY + detailsBoxHeight + 16;
-      const couponStripHeight = 110;
-      const couponStripWidth = cardWidth - 48;
-
+      // 5. Coupon Strip
+      const couponY = detailsY + detailsBoxHeight + 14;
       doc.save();
-      doc.roundedRect(cardX + 24, couponStripY, couponStripWidth, couponStripHeight, 10)
-         .fillColor('#EFF6FF')
-         .strokeColor('#2563EB')
-         .lineWidth(1.5)
-         .dash(4, { space: 3 })
-         .fillAndStroke();
+      doc.roundedRect(cardX + 20, couponY, cardWidth - 40, couponStripHeight, 8)
+        .fillColor('#EFF6FF')
+        .strokeColor('#2563EB')
+        .lineWidth(1.2)
+        .dash(4, { space: 3 })
+        .fillAndStroke();
       doc.restore();
 
-      // Left Box: Coupon Details
-      const couponInnerX = cardX + 40;
-      doc.fillColor('#2563EB')
-         .font('Helvetica-Bold')
-         .fontSize(9)
-         .text('OFFICIAL VERIFICATION COUPON CODE', couponInnerX, couponStripY + 16);
+      const cInnerX = cardX + 32;
+      doc.fillColor('#2563EB').font('Helvetica-Bold').fontSize(8).text('OFFICIAL VERIFICATION COUPON CODE', cInnerX, couponY + 15);
+      doc.fillColor('#1D4ED8').font('Courier-Bold').fontSize(19).text(couponCode, cInnerX, couponY + 31, { characterSpacing: 1.5 });
+      doc.fillColor('#475569').font('Helvetica').fontSize(8.5).text('Present this pass code or scan the QR code for entrance verification.', cInnerX, couponY + 62);
+      doc.fillColor('#94A3B8').font('Helvetica-Oblique').fontSize(7.5).text(`Strictly assigned to Roll No: ${cleanRNo} • Single Entry Pass`, cInnerX, couponY + 78);
 
-      // Large Coupon Code Monospace font
-      doc.fillColor('#1D4ED8')
-         .font('Courier-Bold')
-         .fontSize(22)
-         .text(couponCode, couponInnerX, couponStripY + 34, { characterSpacing: 1.5 });
-
-      doc.fillColor('#475569')
-         .font('Helvetica')
-         .fontSize(9)
-         .text('Present this code or scan QR for attendance.', couponInnerX, couponStripY + 68);
-
-      doc.fillColor('#94A3B8')
-         .font('Helvetica-Oblique')
-         .fontSize(8)
-         .text(`Strictly assigned to Roll No: ${rNo} | Non-transferable`, couponInnerX, couponStripY + 84);
-
-      // Right Box: Embed QR Code
+      // Embed QR code
       if (qrBuffer) {
         const qrSize = 82;
-        const qrX = cardX + 24 + couponStripWidth - qrSize - 16;
-        const qrY = couponStripY + 10;
+        const qrX = cardX + cardWidth - 40 - qrSize - 4;
+        const qrY = couponY + 12;
 
-        // White background border for QR code
         doc.save();
         doc.roundedRect(qrX - 4, qrY - 4, qrSize + 8, qrSize + 8, 6)
-           .fillColor('#FFFFFF')
-           .strokeColor('#CBD5E1')
-           .lineWidth(1)
-           .fillAndStroke();
+          .fillColor('#FFFFFF')
+          .strokeColor('#CBD5E1')
+          .lineWidth(1)
+          .fillAndStroke();
         doc.restore();
 
         doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
-
-        doc.fillColor('#64748B')
-           .font('Helvetica-Bold')
-           .fontSize(7)
-           .text('SCAN FOR ATTENDANCE', qrX - 10, qrY + qrSize + 6, { width: qrSize + 20, align: 'center' });
+        doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(6.5).text('SCAN FOR ENTRY', qrX - 10, qrY + qrSize + 6, { width: qrSize + 20, align: 'center' });
       }
 
-      // 6. Footer Strip
-      const footerY = cardY + cardHeight - 34;
+      // 6. Card Footer
+      const fY = cardStartY + cardHeight - footerHeight;
       doc.save();
-      doc.rect(cardX, footerY, cardWidth, 34)
-         .fillColor('#F8FAFC')
-         .fill();
-      doc.moveTo(cardX, footerY).lineTo(cardX + cardWidth, footerY).strokeColor('#E2E8F0').lineWidth(1).stroke();
+      doc.rect(cardX, fY, cardWidth, footerHeight).fillColor('#F8FAFC').fill();
+      doc.moveTo(cardX, fY).lineTo(cardX + cardWidth, fY).strokeColor('#E2E8F0').lineWidth(1).stroke();
       doc.restore();
 
-      doc.fillColor('#64748B')
-         .font('Helvetica')
-         .fontSize(8.5)
-         .text('Issued by Aditya University Technical & Cultural Events Council', cardX + 24, footerY + 12);
+      doc.fillColor('#64748B').font('Helvetica').fontSize(8).text('Issued by Aditya University Technical.', cardX + 20, fY + 11);
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(8).text('OFFICIAL DIGITAL PASS', cardX + cardWidth - 160, fY + 11, { width: 140, align: 'right' });
 
-      doc.fillColor('#0F172A')
-         .font('Helvetica-Bold')
-         .fontSize(8.5)
-         .text('OFFICIAL DIGITAL PASS', cardX + cardWidth - 160, footerY + 12, { width: 136, align: 'right' });
+      // 7. Attendee Instructions Box (Directly on A4 sheet)
+      const instY = cardStartY + cardHeight + 22;
+      doc.save();
+      doc.roundedRect(cardX, instY, cardWidth, 110, 8)
+        .fillColor('#FAFAFA')
+        .strokeColor('#E2E8F0')
+        .lineWidth(1)
+        .fillAndStroke();
+      doc.restore();
+
+      doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(9).text('IMPORTANT INSTRUCTIONS FOR ATTENDEES', cardX + 16, instY + 12);
+
+      const instructions = [
+        '1. Present this digital pass on your smartphone or a physical printout at the event venue entrance.',
+        '2. Carrying your official Aditya University Student ID Card is mandatory for verification.',
+        '3. The unique QR code will be scanned by event coordinators to record your attendance.',
+        '4. This pass is strictly non-transferable and valid only for the registered participant.'
+      ];
+
+      let lineY = instY + 29;
+      instructions.forEach(inst => {
+        doc.fillColor('#475569').font('Helvetica').fontSize(8).text(inst, cardX + 16, lineY, { width: cardWidth - 32 });
+        lineY += 17;
+      });
 
       doc.end();
     } catch (err) {
@@ -504,7 +504,7 @@ const generatePrintableCouponHTML = ({ studentName, rNo, branch, eventName, team
       </div>
     </div>
     <div class="ticket-footer">
-      <div>Issued by Aditya University Technical & Cultural Events Council</div>
+      <div>Issued by Aditya University.</div>
       <button class="print-btn" onclick="window.print()">Print Pass</button>
     </div>
   </div>

@@ -484,11 +484,13 @@ app.post('/api/login', async (req, res) => {
     // 2. Club Event Manager role login
     const ClubEvent = require('./models/ClubEvent');
     if (cleanUser && cleanPass) {
-      const clubEvent = await ClubEvent.findOne({
+      const clubEvents = await ClubEvent.find({
         role: new RegExp(`^${cleanUser}$`, 'i')
       });
 
-      if (clubEvent && clubEvent.comparePassword(cleanPass)) {
+      const clubEvent = clubEvents.find(ev => ev.comparePassword(cleanPass));
+
+      if (clubEvent) {
         if (clubEvent.status === 'inactive') {
           return res.status(403).json({
             success: false,
