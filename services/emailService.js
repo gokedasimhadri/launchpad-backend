@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const nodemailer = require('nodemailer');
 const QRCode = require('qrcode');
 const PDFDocument = require('pdfkit');
+const { drawCode128OnPdf, generateCode128DataUrl, generateCode128SvgString, generateCode128PngBuffer } = require('../utils/barcodeGenerator');
 
 /**
  * Creates and configures the Nodemailer transporter.
@@ -230,7 +231,7 @@ const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, te
       doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(7.5).text('REGISTRATION ROLE', col2X, row2Y);
       doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(10).text(roleText, col2X, row2Y + 10, { width: colWidth, ellipsis: true });
 
-      // 5. Coupon Strip
+      // 5. Official Barcode & Coupon Strip
       const couponY = detailsY + detailsBoxHeight + 14;
       doc.save();
       doc.roundedRect(cardX + 20, couponY, cardWidth - 40, couponStripHeight, 8)
@@ -242,28 +243,25 @@ const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, te
       doc.restore();
 
       const cInnerX = cardX + 32;
-      doc.fillColor('#2563EB').font('Helvetica-Bold').fontSize(8).text('OFFICIAL VERIFICATION COUPON CODE', cInnerX, couponY + 15);
-      doc.fillColor('#1D4ED8').font('Courier-Bold').fontSize(19).text(couponCode, cInnerX, couponY + 31, { characterSpacing: 1.5 });
-      doc.fillColor('#475569').font('Helvetica').fontSize(8.5).text('Present this pass code or scan the QR code for entrance verification.', cInnerX, couponY + 62);
-      doc.fillColor('#94A3B8').font('Helvetica-Oblique').fontSize(7.5).text(`Strictly assigned to Roll No: ${cleanRNo} • Single Entry Pass`, cInnerX, couponY + 78);
+      const cInnerW = cardWidth - 64;
 
-      // Embed QR code
-      if (qrBuffer) {
-        const qrSize = 82;
-        const qrX = cardX + cardWidth - 40 - qrSize - 4;
-        const qrY = couponY + 12;
+      // Header row inside coupon strip
+      doc.fillColor('#2563EB').font('Helvetica-Bold').fontSize(8).text('OFFICIAL VERIFICATION BARCODE PASS', cInnerX, couponY + 11);
+      doc.fillColor('#1D4ED8').font('Courier-Bold').fontSize(14).text(couponCode, cardX + cardWidth - 260, couponY + 9, { width: 228, align: 'right', characterSpacing: 1.5 });
 
-        doc.save();
-        doc.roundedRect(qrX - 4, qrY - 4, qrSize + 8, qrSize + 8, 6)
-          .fillColor('#FFFFFF')
-          .strokeColor('#CBD5E1')
-          .lineWidth(1)
-          .fillAndStroke();
-        doc.restore();
+      // Embed Vector Code 128 Barcode directly onto the PDF
+      const barcodeBoxH = 50;
+      const barcodeBoxY = couponY + 27;
+      drawCode128OnPdf(doc, couponCode, cInnerX, barcodeBoxY, cInnerW, barcodeBoxH, {
+        showText: false,
+        bgColor: '#FFFFFF',
+        borderColor: '#CBD5E1'
+      });
 
-        doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
-        doc.fillColor('#64748B').font('Helvetica-Bold').fontSize(6.5).text('SCAN FOR ENTRY', qrX - 10, qrY + qrSize + 6, { width: qrSize + 20, align: 'center' });
-      }
+      // Barcode Footer Note
+      doc.fillColor('#334155').font('Helvetica-Bold').fontSize(7.5).text('⚡ Scan barcode for attendance verification.', cInnerX, couponY + 83);
+      doc.fillColor('#64748B').font('Helvetica-Oblique').fontSize(7).text(`Roll No: ${cleanRNo} • Single Entry • CODE-128`, cardX + cardWidth - 240, couponY + 83, { width: 208, align: 'right' });
+      doc.fillColor('#94A3B8').font('Helvetica').fontSize(6.8).text('Keep this barcode pass ready on mobile screen or printed A4 sheet for gate scanner.', cInnerX, couponY + 95);
 
       // 6. Card Footer
       const fY = cardStartY + cardHeight - footerHeight;
@@ -272,7 +270,7 @@ const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, te
       doc.moveTo(cardX, fY).lineTo(cardX + cardWidth, fY).strokeColor('#E2E8F0').lineWidth(1).stroke();
       doc.restore();
 
-      doc.fillColor('#64748B').font('Helvetica').fontSize(8).text('Issued by Aditya University Technical.', cardX + 20, fY + 11);
+      doc.fillColor('#64748B').font('Helvetica').fontSize(8).text('Issued by Aditya University.', cardX + 20, fY + 11);
       doc.fillColor('#0F172A').font('Helvetica-Bold').fontSize(8).text('OFFICIAL DIGITAL PASS', cardX + cardWidth - 160, fY + 11, { width: 140, align: 'right' });
 
       // 7. Attendee Instructions Box (Directly on A4 sheet)
@@ -290,7 +288,7 @@ const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, te
       const instructions = [
         '1. Present this digital pass on your smartphone or a physical printout at the event venue entrance.',
         '2. Carrying your official Aditya University Student ID Card is mandatory for verification.',
-        '3. The unique QR code will be scanned by event coordinators to record your attendance.',
+        '3. The unique BAR code will be scanned by event coordinators to record your attendance.',
         '4. This pass is strictly non-transferable and valid only for the registered participant.'
       ];
 
@@ -494,12 +492,14 @@ const generatePrintableCouponHTML = ({ studentName, rNo, branch, eventName, team
           <div class="hint">Official Verification Coupon Code</div>
           <div class="coupon-code">${couponCode}</div>
           <div style="font-size: 12px; color: #475569; margin-top: 6px;">
-            Present this code or scan QR for attendance.
+            Present this barcode or pass code for gate attendance.
           </div>
         </div>
-        <div class="qr-container">
-          <img src="${qrDataUrl}" alt="QR Code" />
-          <div style="font-size: 10px; color: #64748b; margin-top: 4px;">SCAN PASS</div>
+        <div class="qr-container" style="min-width: 180px;">
+          <div style="background: #ffffff; padding: 6px; border-radius: 8px; border: 1px solid #cbd5e1;">
+            ${generateCode128SvgString(couponCode, { height: 48, showText: false })}
+          </div>
+          <div style="font-size: 10px; color: #64748b; font-weight: 700; margin-top: 4px;">SCAN BARCODE</div>
         </div>
       </div>
     </div>
@@ -598,10 +598,12 @@ const buildEmailHTML = ({ studentName, rNo, branch, eventName, teamName, couponC
                       </div>
                     </td>
 
-                    <!-- Embedded QR Code -->
-                    <td style="width: 110px; text-align: center; vertical-align: middle; padding-left: 12px;">
-                      <img src="cid:couponqrcode" alt="QR Code" width="100" height="100" style="display: block; margin: 0 auto; border-radius: 8px; border: 1px solid #cbd5e1; background-color: #ffffff; padding: 4px;" />
-                      <span style="display: block; font-size: 9px; color: #64748b; font-weight: 700; margin-top: 4px; text-transform: uppercase;">SCAN FOR ATTENDANCE </span>
+                    <!-- Embedded Barcode -->
+                    <td style="width: 200px; text-align: center; vertical-align: middle; padding-left: 12px;">
+                      <div style="background-color: #ffffff; border: 1.5px solid #cbd5e1; border-radius: 8px; padding: 8px 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.04);">
+                        <img src="cid:couponbarcode" alt="Event Barcode ${couponCode}" width="180" height="52" style="display: block; margin: 0 auto; width: 180px; height: 52px; border: 0;" />
+                        <span style="display: block; font-size: 8.5px; color: #475569; font-weight: 700; margin-top: 4px; letter-spacing: 0.5px;">⚡ SCAN BARCODE AT GATE (CODE-128)</span>
+                      </div>
                     </td>
                   </tr>
                 </table>
@@ -661,20 +663,10 @@ const sendCouponEmail = async ({
     throw new Error(`Invalid or missing email address: ${to}`);
   }
 
-  // 1. Generate QR Code data URL & PNG Buffer
-  const qrDataUrl = await QRCode.toDataURL(couponCode, {
-    width: 250,
-    margin: 1,
-    color: {
-      dark: '#0f172a',
-      light: '#ffffff',
-    },
-  });
+  // 1. Generate crisp Code 128 Barcode PNG Buffer (Compatible with all email clients including Gmail)
+  const barcodeBuffer = generateCode128PngBuffer(couponCode, { height: 60, moduleWidth: 2 });
 
-  const base64Data = qrDataUrl.replace(/^data:image\/png;base64,/, '');
-  const qrBuffer = Buffer.from(base64Data, 'base64');
-
-  // 2. Generate official PDF event pass attachment
+  // 2. Generate official PDF event pass attachment (with vector barcode)
   const pdfBuffer = await generateCouponPDFBuffer({
     studentName,
     rNo,
@@ -683,7 +675,6 @@ const sendCouponEmail = async ({
     teamName,
     couponCode,
     isLeader,
-    qrBuffer,
   });
 
   // 3. Build email body
@@ -695,7 +686,6 @@ const sendCouponEmail = async ({
     teamName,
     couponCode,
     isLeader,
-    qrDataUrl,
   });
 
   const cleanRNo = String(rNo || 'student').replace(/[^a-zA-Z0-9]/g, '');
@@ -712,9 +702,10 @@ const sendCouponEmail = async ({
     html: emailHtml,
     attachments: [
       {
-        filename: 'qr-code.png',
-        content: qrBuffer,
-        cid: 'couponqrcode', // Referenced in <img src="cid:couponqrcode" />
+        filename: 'barcode.png',
+        content: barcodeBuffer,
+        cid: 'couponbarcode', // Matches <img src="cid:couponbarcode" />
+        contentType: 'image/png',
       },
       {
         filename: `Aditya_Event_Pass_${cleanRNo}_${cleanCoupon}.pdf`,

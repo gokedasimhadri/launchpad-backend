@@ -614,7 +614,6 @@ router.post('/coupons/regenerate', async (req, res) => {
 router.get('/coupons/download-pdf', async (req, res) => {
   try {
     const { registrationId, memberId, rNo } = req.query;
-    const QRCode = require('qrcode');
 
     const reg = await ClubEventRegistration.findById(registrationId);
     if (!reg) {
@@ -638,7 +637,6 @@ router.get('/coupons/download-pdf', async (req, res) => {
     }
 
     const couponCode = target.couponCode || reg.couponCode || 'AU-PASS';
-    const qrBuffer = await QRCode.toBuffer(couponCode, { width: 250, margin: 1 });
 
     const pdfBuffer = await emailService.generateCouponPDFBuffer({
       studentName: target.name,
@@ -647,8 +645,7 @@ router.get('/coupons/download-pdf', async (req, res) => {
       eventName: reg.eventName,
       teamName: reg.teamName,
       couponCode: couponCode,
-      isLeader: isLeader,
-      qrBuffer: qrBuffer
+      isLeader: isLeader
     });
 
     const cleanRNo = String(target.rNo || 'student').replace(/[^a-zA-Z0-9]/g, '');
