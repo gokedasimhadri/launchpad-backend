@@ -96,4 +96,7 @@ clubEventSchema.methods.comparePassword = function (candidatePassword) {
   return bcrypt.compareSync(candidatePassword, this.password);
 };
 
+clubEventSchema.index({ role: 1 });
+clubEventSchema.index({ status: 1 });
+
 module.exports = mongoose.model('ClubEvent', clubEventSchema);

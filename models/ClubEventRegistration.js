@@ -149,6 +149,11 @@ clubEventRegistrationSchema.index({ eventId: 1, rNo: 1 }, { unique: true });
 clubEventRegistrationSchema.index({ eventId: 1, 'teamMembers.rNo': 1 });
 clubEventRegistrationSchema.index({ couponCode: 1 });
 clubEventRegistrationSchema.index({ 'teamMembers.couponCode': 1 });
+clubEventRegistrationSchema.index({ paymentStatus: 1, createdAt: -1 });
+clubEventRegistrationSchema.index({ paymentStatus: 1, eventId: 1 });
+clubEventRegistrationSchema.index({ paymentStatus: 1, eventSlug: 1 });
+clubEventRegistrationSchema.index({ paymentStatus: 1, couponSentStatus: 1 });
+clubEventRegistrationSchema.index({ createdAt: -1 });
 
 // Explicit collection name 'clubeventregistrations'
 module.exports = mongoose.model('ClubEventRegistration', clubEventRegistrationSchema, 'clubeventregistrations');

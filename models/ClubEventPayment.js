@@ -99,6 +99,9 @@ const clubEventPaymentSchema = new mongoose.Schema(
 clubEventPaymentSchema.index({ eventId: 1, rNo: 1 });
 clubEventPaymentSchema.index({ razorpayPaymentId: 1 });
 clubEventPaymentSchema.index({ registrationId: 1 });
+clubEventPaymentSchema.index({ paymentStatus: 1 });
+clubEventPaymentSchema.index({ eventId: 1, paymentStatus: 1 });
+clubEventPaymentSchema.index({ eventSlug: 1, paymentStatus: 1 });
 
 // Explicit collection name 'clubeventrpayments' as requested
 module.exports = mongoose.model('ClubEventPayment', clubEventPaymentSchema, 'clubeventrpayments');

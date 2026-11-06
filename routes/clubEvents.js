@@ -185,8 +185,9 @@ router.get('/registrations', async (req, res) => {
       };
     }
 
-    const allRegistrations = await ClubEventRegistration.find(statsQuery).lean();
-    const allPayments = await ClubEventPayment.find(paymentStatsQuery).lean();
+    // Project only fields needed for stats to minimize network transfer
+    const allRegistrations = await ClubEventRegistration.find(statsQuery, 'paymentStatus amountPaid').lean();
+    const allPayments = await ClubEventPayment.find(paymentStatsQuery, 'amount').lean();
 
     const totalCount = allRegistrations.length;
     const paidCount = allRegistrations.filter(r => r.paymentStatus === 'paid').length;
@@ -266,9 +267,10 @@ router.get('/coupons', async (req, res) => {
     }
 
     const query = andClauses.length > 0 ? { $and: andClauses } : { paymentStatus: 'paid' };
-    const registrations = await ClubEventRegistration.find(query).sort({ createdAt: -1 });
+    const registrations = await ClubEventRegistration.find(query).sort({ createdAt: -1 }).lean();
 
-    // Ensure all paid members have unique coupon codes generated and persisted
+    // Ensure all paid members have unique coupon codes generated and persisted via fast bulkWrite
+    const bulkOps = [];
     for (const reg of registrations) {
       let modified = false;
       if (Array.isArray(reg.teamMembers) && reg.teamMembers.length > 0) {
@@ -291,8 +293,23 @@ router.get('/coupons', async (req, res) => {
         }
       }
       if (modified) {
-        await reg.save();
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: reg._id },
+            update: {
+              $set: {
+                couponCode: reg.couponCode,
+                couponSentStatus: reg.couponSentStatus,
+                teamMembers: reg.teamMembers
+              }
+            }
+          }
+        });
       }
+    }
+
+    if (bulkOps.length > 0) {
+      await ClubEventRegistration.bulkWrite(bulkOps, { ordered: false });
     }
 
     // Flatten into individual participant rows for event-wise viewing
@@ -364,33 +381,54 @@ router.get('/coupons', async (req, res) => {
     });
 
     // Compute all events list for dropdown (scoped to role if applicable)
-    let paidRegsQuery = { paymentStatus: 'paid' };
-    if (roleEventIds.length > 0 || roleEventSlugs.length > 0) {
-      paidRegsQuery = {
-        paymentStatus: 'paid',
-        $or: [
-          { eventId: { $in: roleEventIds } },
-          { eventSlug: { $in: roleEventSlugs } }
-        ]
-      };
-    }
-    const allPaidRegs = await ClubEventRegistration.find(paidRegsQuery).lean();
-    const eventCountsMap = new Map();
-    allPaidRegs.forEach(r => {
-      const eId = r.eventId ? r.eventId.toString() : r.eventSlug;
-      const count = Array.isArray(r.teamMembers) && r.teamMembers.length > 0 ? r.teamMembers.length : 1;
-      if (!eventCountsMap.has(eId)) {
-        eventCountsMap.set(eId, {
-          eventId: eId,
-          eventName: r.eventName,
-          count: count
-        });
-      } else {
-        const item = eventCountsMap.get(eId);
-        item.count += count;
+    let distinctEvents = [];
+    if (!eventId || eventId === 'all') {
+      // Fast in-memory aggregation: Zero extra DB queries!
+      const eventCountsMap = new Map();
+      registrations.forEach(r => {
+        const eId = r.eventId ? r.eventId.toString() : r.eventSlug;
+        const count = Array.isArray(r.teamMembers) && r.teamMembers.length > 0 ? r.teamMembers.length : 1;
+        if (!eventCountsMap.has(eId)) {
+          eventCountsMap.set(eId, {
+            eventId: eId,
+            eventName: r.eventName,
+            count: count
+          });
+        } else {
+          const item = eventCountsMap.get(eId);
+          item.count += count;
+        }
+      });
+      distinctEvents = Array.from(eventCountsMap.values());
+    } else {
+      let paidRegsQuery = { paymentStatus: 'paid' };
+      if (roleEventIds.length > 0 || roleEventSlugs.length > 0) {
+        paidRegsQuery = {
+          paymentStatus: 'paid',
+          $or: [
+            { eventId: { $in: roleEventIds } },
+            { eventSlug: { $in: roleEventSlugs } }
+          ]
+        };
       }
-    });
-    const distinctEvents = Array.from(eventCountsMap.values());
+      const allPaidRegs = await ClubEventRegistration.find(paidRegsQuery, 'eventId eventSlug eventName teamMembers').lean();
+      const eventCountsMap = new Map();
+      allPaidRegs.forEach(r => {
+        const eId = r.eventId ? r.eventId.toString() : r.eventSlug;
+        const count = Array.isArray(r.teamMembers) && r.teamMembers.length > 0 ? r.teamMembers.length : 1;
+        if (!eventCountsMap.has(eId)) {
+          eventCountsMap.set(eId, {
+            eventId: eId,
+            eventName: r.eventName,
+            count: count
+          });
+        } else {
+          const item = eventCountsMap.get(eId);
+          item.count += count;
+        }
+      });
+      distinctEvents = Array.from(eventCountsMap.values());
+    }
 
     const totalCount = flatList.length;
     const sentCount = flatList.filter(item => item.couponSentStatus === 'sent').length;
