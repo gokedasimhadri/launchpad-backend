@@ -447,37 +447,31 @@ router.post('/coupons/send-single', async (req, res) => {
       return res.status(400).json({ success: false, message: 'A valid email address is required.' });
     }
 
-    const reg = await ClubEventRegistration.findById(registrationId);
-    if (!reg) {
-      return res.status(404).json({ success: false, message: 'Registration not found' });
-    }
-
-    // Send email via emailService
+    // Send email via emailService using pooled SMTP
     const emailResult = await emailService.sendCouponEmail({
       to: email,
-      studentName: studentName || reg.name,
-      rNo: rNo || reg.rNo,
-      branch: branch || reg.branch,
-      eventName: eventName || reg.eventName,
-      teamName: teamName || reg.teamName,
-      couponCode: couponCode || reg.couponCode,
+      studentName: studentName || 'Student',
+      rNo: rNo || 'N/A',
+      branch: branch || 'General',
+      eventName: eventName || 'Aditya University Event',
+      teamName: teamName || '',
+      couponCode: couponCode || 'PASS',
       isLeader: Boolean(isLeader)
     });
 
-    // Update sent status in DB
+    // Fast atomic DB update
     const now = new Date();
-    if (memberId && Array.isArray(reg.teamMembers)) {
-      const sub = reg.teamMembers.id(memberId) || reg.teamMembers.find(m => m.rNo === rNo);
-      if (sub) {
-        sub.couponSentAt = now;
-        sub.couponSentStatus = 'sent';
-      }
+    if (memberId) {
+      await ClubEventRegistration.updateOne(
+        { _id: registrationId, 'teamMembers._id': memberId },
+        { $set: { 'teamMembers.$.couponSentAt': now, 'teamMembers.$.couponSentStatus': 'sent' } }
+      );
+    } else {
+      await ClubEventRegistration.updateOne(
+        { _id: registrationId },
+        { $set: { couponSentAt: now, couponSentStatus: 'sent' } }
+      );
     }
-    if (reg.rNo === rNo || !memberId) {
-      reg.couponSentAt = now;
-      reg.couponSentStatus = 'sent';
-    }
-    await reg.save();
 
     res.status(200).json({
       success: true,
@@ -493,7 +487,7 @@ router.post('/coupons/send-single', async (req, res) => {
   }
 });
 
-// POST /api/club-events/coupons/bulk-send - Send coupon emails to all selected or all paid students
+// POST /api/club-events/coupons/bulk-send - Send coupon emails to all selected or all paid students with parallel concurrency
 router.post('/coupons/bulk-send', async (req, res) => {
   try {
     const { items } = req.body;
@@ -506,14 +500,18 @@ router.post('/coupons/bulk-send', async (req, res) => {
     let failedCount = 0;
     const results = [];
 
-    for (const item of items) {
-      try {
-        if (!item.email || !item.email.includes('@')) {
-          failedCount++;
-          results.push({ rNo: item.rNo, name: item.name, success: false, error: 'Invalid or missing email' });
-          continue;
-        }
+    // Worker function for a single item with atomic update
+    const sendItem = async (item) => {
+      if (!item.email || !item.email.includes('@')) {
+        return {
+          rNo: item.rNo,
+          name: item.name,
+          success: false,
+          error: 'Invalid or missing email'
+        };
+      }
 
+      try {
         const sendResult = await emailService.sendCouponEmail({
           to: item.email,
           studentName: item.name,
@@ -525,40 +523,52 @@ router.post('/coupons/bulk-send', async (req, res) => {
           isLeader: item.isLeader
         });
 
-        // Update database
-        const reg = await ClubEventRegistration.findById(item.registrationId);
-        if (reg) {
-          const now = new Date();
-          if (item.memberId && Array.isArray(reg.teamMembers)) {
-            const sub = reg.teamMembers.id(item.memberId) || reg.teamMembers.find(m => m.rNo === item.rNo);
-            if (sub) {
-              sub.couponSentAt = now;
-              sub.couponSentStatus = 'sent';
-            }
-          }
-          if (reg.rNo === item.rNo || !item.memberId) {
-            reg.couponSentAt = now;
-            reg.couponSentStatus = 'sent';
-          }
-          await reg.save();
+        // Fast atomic DB update
+        const now = new Date();
+        if (item.memberId) {
+          await ClubEventRegistration.updateOne(
+            { _id: item.registrationId, 'teamMembers._id': item.memberId },
+            { $set: { 'teamMembers.$.couponSentAt': now, 'teamMembers.$.couponSentStatus': 'sent' } }
+          );
+        } else {
+          await ClubEventRegistration.updateOne(
+            { _id: item.registrationId },
+            { $set: { couponSentAt: now, couponSentStatus: 'sent' } }
+          );
         }
 
-        successCount++;
-        results.push({
+        return {
           rNo: item.rNo,
           name: item.name,
           email: item.email,
           couponCode: item.couponCode,
           success: true,
-          previewUrl: sendResult.previewUrl
-        });
+          previewUrl: sendResult.previewUrl || null
+        };
+      } catch (err) {
+        console.error(`Email dispatch error for ${item.rNo}:`, err.message);
+        return {
+          rNo: item.rNo,
+          name: item.name,
+          success: false,
+          error: err.message || 'Dispatch failed'
+        };
+      }
+    };
 
-        // Polite delay between mail sends to avoid throttling (150ms)
-        await new Promise(r => setTimeout(r, 150));
-      } catch (itemErr) {
-        console.error(`Bulk send error for ${item.rNo}:`, itemErr);
-        failedCount++;
-        results.push({ rNo: item.rNo, name: item.name, success: false, error: itemErr.message });
+    // Parallel processing with concurrency pool of 4 workers
+    const CONCURRENCY = 4;
+    for (let i = 0; i < items.length; i += CONCURRENCY) {
+      const chunk = items.slice(i, i + CONCURRENCY);
+      const chunkResults = await Promise.all(chunk.map(sendItem));
+
+      for (const r of chunkResults) {
+        if (r.success) {
+          successCount++;
+        } else {
+          failedCount++;
+        }
+        results.push(r);
       }
     }
 

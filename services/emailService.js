@@ -1,3 +1,4 @@
+const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
 const nodemailer = require('nodemailer');
@@ -6,16 +7,38 @@ const PDFDocument = require('pdfkit');
 const { drawCode128OnPdf, generateCode128DataUrl, generateCode128SvgString, generateCode128PngBuffer } = require('../utils/barcodeGenerator');
 
 /**
- * Creates and configures the Nodemailer transporter.
+ * Creates and configures the Nodemailer transporter with connection pooling.
  */
 let cachedTransporter = null;
 let lastUser = null;
 let lastPass = null;
 let isEtherealAccount = false;
+let lastEnvCheck = 0;
+let cachedLogoBuffer = null;
+let logoChecked = false;
+
+const getLogoBuffer = () => {
+  if (!logoChecked) {
+    logoChecked = true;
+    const logoPath = path.join(__dirname, '../public/images/logo.png');
+    if (fs.existsSync(logoPath)) {
+      try {
+        cachedLogoBuffer = fs.readFileSync(logoPath);
+      } catch (e) {
+        cachedLogoBuffer = null;
+      }
+    }
+  }
+  return cachedLogoBuffer;
+};
 
 const getTransporter = async () => {
-  // Reload dotenv to pick up any freshly modified EMAIL_USER and EMAIL_PASS
-  dotenv.config({ path: path.join(__dirname, '../.env') });
+  const now = Date.now();
+  // Reload dotenv at most once every 30 seconds to avoid unnecessary disk I/O
+  if (now - lastEnvCheck > 30000 || !lastUser) {
+    dotenv.config({ path: path.join(__dirname, '../.env') });
+    lastEnvCheck = now;
+  }
 
   const user = (process.env.EMAIL_USER || process.env.SMTP_USER || '').trim();
   const pass = (process.env.EMAIL_PASS || process.env.SMTP_PASS || '').trim();
@@ -39,6 +62,9 @@ const getTransporter = async () => {
 
   // If credentials have changed or newly added, invalidate cache
   if (user !== lastUser || pass !== lastPass) {
+    if (cachedTransporter && typeof cachedTransporter.close === 'function') {
+      try { cachedTransporter.close(); } catch (_) {}
+    }
     cachedTransporter = null;
     lastUser = user;
     lastPass = pass;
@@ -49,23 +75,34 @@ const getTransporter = async () => {
     if (!cachedTransporter || isEtherealAccount) {
       if (host.includes('office365') || host.includes('outlook') || user.includes('adityauniversity.in') || user.includes('aditya.ac.in')) {
         cachedTransporter = nodemailer.createTransport({
+          pool: true,
+          maxConnections: 5,
+          maxMessages: 100,
+          rateLimit: 14,
           host: 'smtp.office365.com',
           port: 587,
           secure: false,
           auth: { user, pass },
           tls: {
-            ciphers: 'SSLv3',
+            minVersion: 'TLSv1.2',
             rejectUnauthorized: false,
           },
         });
       } else if (user.endsWith('@gmail.com') || (process.env.EMAIL_SERVICE || '').toLowerCase() === 'gmail') {
         cachedTransporter = nodemailer.createTransport({
+          pool: true,
+          maxConnections: 5,
+          maxMessages: 100,
+          rateLimit: 14,
           service: 'gmail',
           auth: { user, pass },
           tls: { rejectUnauthorized: false },
         });
       } else {
         cachedTransporter = nodemailer.createTransport({
+          pool: true,
+          maxConnections: 5,
+          maxMessages: 100,
           host,
           port,
           secure,
@@ -74,7 +111,12 @@ const getTransporter = async () => {
         });
       }
       isEtherealAccount = false;
-      console.log(`[EmailService] Transporter configured for account: ${user} via ${host}:${port}`);
+      console.log(`[EmailService] Pooled transporter configured for account: ${user} via ${host}:${port}`);
+
+      // Background connection verify & pre-warming
+      cachedTransporter.verify().catch((err) => {
+        console.warn('[EmailService] SMTP verify note:', err.message);
+      });
     }
     return cachedTransporter;
   }
@@ -168,10 +210,10 @@ const generateCouponPDFBuffer = async ({ studentName, rNo, branch, eventName, te
       doc.restore();
 
       // Logo or University Name
-      const logoPath = path.join(__dirname, '../public/images/logo.png');
-      if (fs.existsSync(logoPath)) {
+      const logoBuf = getLogoBuffer();
+      if (logoBuf) {
         try {
-          doc.image(logoPath, cardX + 18, cardStartY + 14, { height: 42 });
+          doc.image(logoBuf, cardX + 18, cardStartY + 14, { height: 42 });
         } catch {
           doc.fillColor('#F59E0B').font('Helvetica-Bold').fontSize(16).text('ADITYA UNIVERSITY', cardX + 22, cardStartY + 20);
           doc.fillColor('#CBD5E1').font('Helvetica').fontSize(9).text('OFFICIAL EVENT PASS', cardX + 22, cardStartY + 42);
