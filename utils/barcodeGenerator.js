@@ -124,8 +124,8 @@ function drawCode128OnPdf(doc, text, x, y, width, height, options = {}) {
  * Generates an SVG string of the barcode.
  */
 function generateCode128SvgString(text, options = {}) {
-  const { height = 50, showText = true } = options;
-  const { totalModules, bars } = generateCode128Bars(text, 6);
+  const { height = 70, showText = true } = options;
+  const { totalModules, bars } = generateCode128Bars(text, 12);
   const textSpace = showText ? 16 : 0;
   const totalSvgHeight = height + textSpace;
 
@@ -139,7 +139,7 @@ function generateCode128SvgString(text, options = {}) {
     textSvg = `<text x="${totalModules / 2}" y="${height + 12}" text-anchor="middle" font-family="'Courier New', Courier, monospace" font-size="10" font-weight="700" fill="#0F172A" letter-spacing="1.5px">${text}</text>`;
   }
 
-  return `<svg viewBox="0 0 ${totalModules} ${totalSvgHeight}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg" style="background:#FFFFFF;display:block;width:100%;height:100%;"><rect width="100%" height="100%" fill="#FFFFFF"/>${rects}${textSvg}</svg>`;
+  return `<svg viewBox="0 0 ${totalModules} ${totalSvgHeight}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="background:#FFFFFF;display:block;width:100%;height:100%;"><rect width="100%" height="100%" fill="#FFFFFF"/>${rects}${textSvg}</svg>`;
 }
 
 /**
@@ -157,7 +157,7 @@ function generateCode128DataUrl(text, options = {}) {
  */
 function generateCode128PngBuffer(text, options = {}) {
   const { PNG } = require('pngjs');
-  const { moduleWidth = 2, height = 70, quietZoneModules = 8 } = options;
+  const { moduleWidth = 2, height = 76, quietZoneModules = 12 } = options;
   const { totalModules, bars } = generateCode128Bars(text, quietZoneModules);
 
   const width = totalModules * moduleWidth;
